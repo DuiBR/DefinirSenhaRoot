@@ -3,20 +3,10 @@
 # Pequeno script para permitir autenticação root por senha (USE COM CAUTELA)
 set -euo pipefail
 
-# Verifica se o terminal suporta cores
-if tput colors >/dev/null 2>&1 && [[ -t 1 ]]; then
-  RED='\033[1;31m'
-  GREEN='\033[1;32m'
-  YELLOW='\033[1;33m'
-  WHITE='\033[1;37m'
-  NC='\033[0m' # No Color
-else
-  RED=''
-  GREEN=''
-  YELLOW=''
-  WHITE=''
-  NC=''
-fi
+# Define as cores
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+WHITE='\033[1;37m'
 
 # Função de spinner de loading
 spinner() {
@@ -25,33 +15,33 @@ spinner() {
     local spin='|/-\'
     while ps -p $pid > /dev/null 2>&1; do
         for i in $(seq 0 3); do
-            printf "\r\033[1;33m[AGUARDE]\033[0m %s" "${spin:$i:1}"
+            printf "\r${WHITE}[AGUARDE]${RED} %s" "${spin:$i:1}"
             sleep $delay
         done
     done
-    printf "\r\033[1;32m✔ Concluído\033[0m\n"
+    printf "\r${GREEN}✔ Concluído\n"
 }
 
 # --- AVISO DE SEGURANÇA ---
 cat <<EOF
-${RED}╔════════════════════════════════════════════════════╗${NC}
-${RED}║          🚨 AVISO DE SEGURANÇA 🚨                  ║${NC}
-${WHITE}║ Este script ativa login root por senha.            ║${NC}
-${WHITE}║ Isso é inseguro. Considere usar chaves SSH em vez de senha. ${NC}
-${RED}╚════════════════════════════════════════════════════╝${NC}
+${RED}╔════════════════════════════════════════════════════╗
+${RED}║          🚨 AVISO DE SEGURANÇA 🚨                  ║
+${WHITE}║ Este script ativa login root por senha.            ║
+${WHITE}║ Isso é inseguro. Considere usar chaves SSH em vez de senha. ║
+${RED}╚════════════════════════════════════════════════════╝
 EOF
 sleep 2
 
 # Verifica root
 if [[ "$(id -u)" -ne 0 ]]; then
-  echo -e "${RED}🚫 EXECUTE COMO USUÁRIO ROOT (ex: sudo -i)${NC}"
+  echo -e "${RED}🚫 EXECUTE COMO USUÁRIO ROOT (ex: sudo -i)"
   exit 1
 fi
 
 # Atualiza resolv.conf (ATENÇÃO: pode ser sobrescrito por DHCP/systemd-resolved)
 {
   if command -v resolvconf >/dev/null 2>&1 || systemctl is-active --quiet systemd-resolved; then
-    echo -e "${YELLOW}Observação: /etc/resolv.conf pode ser gerenciado pelo sistema (systemd-resolved/DHCP).${NC}"
+    echo -e "${WHITE}Observação: /etc/resolv.conf pode ser gerenciado pelo sistema (systemd-resolved/DHCP)."
   fi
   cat > /etc/resolv.conf <<EOF
 nameserver 1.1.1.1
@@ -99,7 +89,7 @@ fi
 {
   if command -v systemctl >/dev/null 2>&1; then
     systemctl restart sshd.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || {
-      echo -e "${YELLOW}Falha ao reiniciar via systemctl, tentando service...${NC}"
+      echo -e "${WHITE}Falha ao reiniciar via systemctl, tentando service..."
       service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
     }
   else
@@ -122,22 +112,18 @@ fi
   iptables_dir="/etc/iptables"
   mkdir -p "$iptables_dir"
   if command -v iptables-save >/dev/null 2>&1; then
-    iptables-save > "$iptables_dir/rules.v4" 2>/dev/null || echo -e "${RED}Falha ao salvar regras em $iptables_dir/rules.v4${NC}"
+    iptables-save > "$iptables_dir/rules.v4" 2>/dev/null || echo -e "${RED}Falha ao salvar regras em $iptables_dir/rules.v4"
   else
-    echo -e "${YELLOW}iptables-save não encontrado; instale iptables-persistent se desejar salvar regras permanentemente.${NC}"
+    echo -e "${WHITE}iptables-save não encontrado; instale iptables-persistent se desejar salvar regras permanentemente."
   fi
 } & spinner "Salvando regras de firewall"
 
 # Solicita senha de root (visível)
 while true; do
-  if [ -n "$YELLOW" ]; then
-    echo -n "${YELLOW}DEFINA A SENHA ROOT 🔐: ${NC}"
-  else
-    echo -n "DEFINA A SENHA ROOT 🔐: "
-  fi
+  echo -n "${WHITE}DEFINA A SENHA ROOT 🔐: "
   read -r senha
   if [[ -z "${senha// /}" ]]; then
-    echo -e "${RED}Erro: A senha não pode ser vazia! 🚫${NC}"
+    echo -e "${RED}Erro: A senha não pode ser vazia! 🚫"
     continue
   fi
   break
@@ -149,7 +135,7 @@ done
 } & spinner "Atualizando senha root"
 
 # Mensagem final
-echo -e "\n${GREEN}════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}[ OK ! ]${WHITE} - SENHA DEFINIDA! ✅${NC}"
-echo -e "${GREEN}[ OK ! ]${WHITE} - Regras de firewall aplicadas (verifique /etc/iptables/rules.v4). ✅${NC}"
-echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
+echo -e "\n${GREEN}════════════════════════════════════════════════════"
+echo -e "${GREEN}[ OK ! ]${WHITE} - SENHA DEFINIDA! ✅"
+echo -e "${GREEN}[ OK ! ]${WHITE} - Regras de firewall aplicadas (verifique /etc/iptables/rules.v4). ✅"
+echo -e "${GREEN}════════════════════════════════════════════════════"
