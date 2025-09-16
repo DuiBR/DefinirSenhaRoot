@@ -18,19 +18,18 @@ else
   NC=''
 fi
 
-# Função para animação com spinner simples
-show_loading() {
-  local msg="$1"
-  local duration="$2"
-  local spinner=('|' '/' '-' '\\')
-  echo -n "${YELLOW}${msg} [${NC}"
-  for ((i=0; i<duration; i++)); do
-    for s in "${spinner[@]}"; do
-      echo -n "${GREEN}${s}${NC}"
-      sleep 0.3
+# Função de spinner de loading
+spinner() {
+    local pid=$!
+    local delay=0.15
+    local spin='|/-\'
+    while ps -p $pid > /dev/null 2>&1; do
+        for i in $(seq 0 3); do
+            printf "\r\033[1;33m[AGUARDE]\033[0m %s" "${spin:$i:1}"
+            sleep $delay
+        done
     done
-  done
-  echo -e "${GREEN}✓] Concluído! ✅${NC}"
+    printf "\r\033[1;32m✔ Concluído\033[0m\n"
 }
 
 # Função para validar senha (mínimo 8 caracteres, sem espaços)
@@ -73,18 +72,20 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 # Atualiza resolv.conf
-show_loading "Configurando servidores DNS" 3
-if command -v resolvconf >/dev/null 2>&1 || systemctl is-active --quiet systemd-resolved; then
-  echo -e "${YELLOW}Observação: /etc/resolv.conf pode ser gerenciado pelo sistema (systemd-resolved/DHCP).${NC}"
-fi
-cat > /etc/resolv.conf <<EOF
+{
+  cat > /etc/resolv.conf <<EOF
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 EOF
+} & spinner "Configurando servidores DNS"
+if command -v resolvconf >/dev/null 2>&1 || systemctl is-active --quiet systemd-resolved; then
+  echo -e "${YELLOW}Observação: /etc/resolv.conf pode ser gerenciado pelo sistema (systemd-resolved/DHCP).${NC}"
+fi
 
 # Atualiza repositórios
-show_loading "Atualizando repositórios" 3
-apt update -y >/dev/null 2>&1 || true
+{
+  apt update -y >/dev/null 2>&1 || true
+} & spinner "Atualizando repositórios"
 
 # Função utilitária para garantir diretiva no sshd_config
 ensure_sshd_directive() {
@@ -92,12 +93,13 @@ ensure_sshd_directive() {
   local directive="$2"
   local value="$3"
   if [[ -f "$file" ]]; then
-    show_loading "Configurando ${directive} em ${file}" 2
-    if grep -q -E "^[#[:space:]]*${directive}" "$file"; then
-      sed -i -r "s|^[#[:space:]]*(${directive}).*|${directive} ${value}|g" "$file"
-    else
-      echo "${directive} ${value}" >> "$file"
-    fi
+    {
+      if grep -q -E "^[#[:space:]]*${directive}" "$file"; then
+        sed -i -r "s|^[#[:space:]]*(${directive}).*|${directive} ${value}|g" "$file"
+      else
+        echo "${directive} ${value}" >> "$file"
+      fi
+    } & spinner "Configurando ${directive} em ${file}"
   fi
 }
 
@@ -115,33 +117,34 @@ if [[ -d /etc/ssh/sshd_config.d ]]; then
 fi
 
 # Reinicia serviço SSH
-show_loading "Reiniciando serviço SSH" 3
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl restart sshd.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || {
-    echo -e "${YELLOW}Falha ao reiniciar via systemctl, tentando service...${NC}"
+{
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl restart sshd.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || {
+      echo -e "${YELLOW}Falha ao reiniciar via systemctl, tentando service...${NC}"
+      service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
+    }
+  else
     service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
-  }
-else
-  service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
-fi
+  fi
+} & spinner "Reiniciando serviço SSH"
 
 # Configura firewall
-show_loading "Configurando regras de firewall" 3
-iptables -F || true
-iptables -P INPUT ACCEPT || true
-iptables -P OUTPUT ACCEPT || true
-
-# Regras explícitas
-for p in 81 80 443 8799 8080 1194; do
-  iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
-done
+{
+  iptables -F || true
+  iptables -P INPUT ACCEPT || true
+  iptables -P OUTPUT ACCEPT || true
+  for p in 81 80 443 8799 8080 1194; do
+    iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
+  done
+} & spinner "Configurando regras de firewall"
 
 # Salva regras
 iptables_dir="/etc/iptables"
 mkdir -p "$iptables_dir"
 if command -v iptables-save >/dev/null 2>&1; then
-  show_loading "Salvando regras de firewall" 2
-  iptables-save > "$iptables_dir/rules.v4" 2>/dev/null || echo -e "${RED}Falha ao salvar regras em $iptables_dir/rules.v4${NC}"
+  {
+    iptables-save > "$iptables_dir/rules.v4" 2>/dev/null || echo -e "${RED}Falha ao salvar regras em $iptables_dir/rules.v4${NC}"
+  } & spinner "Salvando regras de firewall"
 else
   echo -e "${YELLOW}iptables-save não encontrado; instale iptables-persistent para salvar regras permanentemente.${NC}"
 fi
@@ -164,8 +167,9 @@ while true; do
 done
 
 # Atualiza senha root
-show_loading "Atualizando senha root" 2
-echo "root:$senha" | chpasswd
+{
+  echo "root:$senha" | chpasswd
+} & spinner "Atualizando senha root"
 
 # Mensagem final
 echo -e "\n${GREEN}════════════════════════════════════════════════════${NC}"
