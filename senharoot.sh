@@ -1,6 +1,6 @@
 #!/bin/bash
-# By @DuiBR (versão corrigida)
-# Pequeno script para permitir autenticação root por senha (USE COM CAUTELA)
+# By DuiBR
+# Pequeno script para permissao de autenticacao root
 set -euo pipefail
 
 # Define as cores
@@ -33,18 +33,20 @@ echo -e "${RED}╚════════════════════�
 sleep 2
 
 # Verifica root
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo -e "${RED}🚫 EXECUTE COMO USUÁRIO ROOT (ex: sudo -i)${NC}"
+if [[ "$(whoami)" != "root" ]]; then
+  echo -e "${RED}🚫 EXECUTE COMO USUÁRIO ROOT (${YELLOW}sudo -i${NC})${NC}"
   exit 1
 fi
 
-# Atualiza resolv.conf (ATENÇÃO: pode ser sobrescrito por DHCP/systemd-resolved)
+# Limpa regras iptables
 {
-  if command -v resolvconf >/dev/null 2>&1 || systemctl is-active --quiet systemd-resolved; then
-    echo -e "${YELLOW}Observação: /etc/resolv.conf pode ser gerenciado pelo sistema (systemd-resolved/DHCP).${NC}"
-  fi
-  echo "nameserver 1.1.1.1" > /etc/resolv.conf
-  echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+  iptables -F
+} & spinner "Limpando regras iptables"
+
+# Atualiza resolv.conf
+{
+  echo 'nameserver 1.1.1.1' > /etc/resolv.conf
+  echo 'nameserver 8.8.8.8' >> /etc/resolv.conf
 } & spinner "Configurando servidores DNS"
 
 # Atualiza repositórios
@@ -52,75 +54,53 @@ fi
   apt update -y >/dev/null 2>&1 || true
 } & spinner "Atualizando repositórios"
 
-# Função utilitária para garantir diretiva no sshd_config
-ensure_sshd_directive() {
-  local file="$1"
-  local directive="$2"
-  local value="$3"  # ex "yes"
-  if [[ -f "$file" ]]; then
-    {
-      # Se existir a diretiva (comentada ou não), substitui ou descomenta
-      if grep -q -E "^[#[:space:]]*${directive}" "$file"; then
-        sed -i -r "s|^[#[:space:]]*(${directive}).*|${directive} ${value}|g" "$file"
-      else
-        # adiciona no final
-        echo "${directive} ${value}" >> "$file"
-      fi
-    } & spinner "Configurando ${directive} em ${file}"
-  fi
-}
-
-# Aplica nas configurações possíveis
-ensure_sshd_directive /etc/ssh/sshd_config PermitRootLogin yes
-ensure_sshd_directive /etc/ssh/sshd_config PasswordAuthentication yes
-
-# Também verifica diretórios de drop-in (ex: cloud images)
-if [[ -d /etc/ssh/sshd_config.d ]]; then
-  for f in /etc/ssh/sshd_config.d/*.conf; do
-    [[ -f "$f" ]] || continue
-    ensure_sshd_directive "$f" PermitRootLogin yes
-    ensure_sshd_directive "$f" PasswordAuthentication yes
-  done
-fi
-
-# Reinicia serviço ssh/sshd
+# Configura sshd_config
 {
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart sshd.service 2>/dev/null || systemctl restart ssh.service 2>/dev/null || {
-      echo -e "${YELLOW}Falha ao reiniciar via systemctl, tentando service...${NC}"
-      service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
-    }
-  else
-    service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
-  fi
+  [[ $(grep -c "prohibit-password" /etc/ssh/sshd_config) != '0' ]] && {
+    sed -i "s/prohibit-password/yes/g" /etc/ssh/sshd_config
+  }
+  [[ $(grep -c "without-password" /etc/ssh/sshd_config) != '0' ]] && {
+    sed -i "s/without-password/yes/g" /etc/ssh/sshd_config
+  }
+  [[ $(grep -c "#PermitRootLogin" /etc/ssh/sshd_config) != '0' ]] && {
+    sed -i "s/#PermitRootLogin/PermitRootLogin/g" /etc/ssh/sshd_config
+  }
+  [[ $(grep -c "PasswordAuthentication" /etc/ssh/sshd_config) = '0' ]] && {
+    echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
+  }
+  [[ $(grep -c "PasswordAuthentication no" /etc/ssh/sshd_config) != '0' ]] && {
+    sed -i "s/PasswordAuthentication no/PasswordAuthentication yes/g" /etc/ssh/sshd_config
+  }
+  [[ $(grep -c "#PasswordAuthentication no" /etc/ssh/sshd_config) != '0' ]] && {
+    sed -i "s/#PasswordAuthentication no/PasswordAuthentication yes/g" /etc/ssh/sshd_config
+  }
+  sed -i "s/PasswordAuthentication no/PasswordAuthentication yes/g" /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+} & spinner "Configurando autenticação SSH"
+
+# Reinicia serviço SSH
+{
+  service ssh restart >/dev/null
 } & spinner "Reiniciando serviço SSH"
 
-# Limpa regras e abre portas selecionadas
+# Configura regras iptables
 {
-  iptables -F || true
-  iptables -P INPUT ACCEPT || true
-  iptables -P OUTPUT ACCEPT || true
-  for p in 81 80 443 8799 8080 1194; do
-    iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
-  done
+  iptables -F
+  iptables -P INPUT ACCEPT
+  iptables -P OUTPUT ACCEPT
+  iptables -A INPUT -p tcp --dport 81 -j ACCEPT
+  iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+  iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+  iptables -A INPUT -p tcp --dport 8799 -j ACCEPT
+  iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
+  iptables -A INPUT -p tcp --dport 1194 -j ACCEPT
+  iptables-save > /etc/iptables/rules.v4
 } & spinner "Configurando regras de firewall"
-
-# Salva regras (cria diretório se necessário)
-{
-  iptables_dir="/etc/iptables"
-  mkdir -p "$iptables_dir"
-  if command -v iptables-save >/dev/null 2>&1; then
-    iptables-save > "$iptables_dir/rules.v4" 2>/dev/null || echo -e "${RED}Falha ao salvar regras em $iptables_dir/rules.v4${NC}"
-  else
-    echo -e "${YELLOW}iptables-save não encontrado; instale iptables-persistent se desejar salvar regras permanentemente.${NC}"
-  fi
-} & spinner "Salvando regras de firewall"
 
 # Solicita senha de root (visível)
 while true; do
   echo -n "${YELLOW}DEFINA A SENHA ROOT 🔐: ${NC}"
   read -r senha
-  if [[ -z "${senha// /}" ]]; then
+  if [[ -z "$senha" ]]; then
     echo -e "${RED}Erro: A senha não pode ser vazia! 🚫${NC}"
     continue
   fi
@@ -135,5 +115,5 @@ done
 # Mensagem final
 echo -e "\n${GREEN}════════════════════════════════════════════════════"
 echo -e "${GREEN}[ OK ! ]${WHITE} - SENHA DEFINIDA! ✅${NC}"
-echo -e "${GREEN}[ OK ! ]${WHITE} - Regras de firewall aplicadas (verifique /etc/iptables/rules.v4). ✅${NC}"
+echo -e "${GREEN}[ OK ! ]${WHITE} - Todas as portas liberadas com sucesso. Tráfego permitido em todas as portas de entrada e saída. ✅${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
