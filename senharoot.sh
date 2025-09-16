@@ -11,18 +11,24 @@ WHITE=$'\e[1;37m'
 NC=$'\e[0m'
 
 # Função de spinner de loading
+# Uso: { comando; } & spinner "Mensagem descritiva"
 spinner() {
     local pid=$!           # pid do último processo em background
+    local msg="$1"
     local delay=0.15
     local spin="|/-\\"
+
+    # Enquanto o processo existir, mostra a animação e a mensagem
     while ps -p "$pid" > /dev/null 2>&1; do
         for i in 0 1 2 3; do
-            # imprime a mensagem com cores e o caractere do spinner
-            printf "\r%b %s" "${YELLOW}[AGUARDE]${RED}" "${spin:$i:1}"
+            # Limpa a linha e escreve: [AGUARDE] Mensagem : <spinner>
+            printf "\r\033[K%b[AGUARDE] %b%s: %b%s" "$YELLOW" "$WHITE" "$msg" "$RED" "${spin:$i:1}"
             sleep "$delay"
         done
     done
-    printf "\r%b✔ Concluído%b\n" "$GREEN" "$NC"
+
+    # Após terminar, substitui pela mensagem final com ✔ Concluído
+    printf "\r\033[K%b%s: %b✔ Concluído%b\n" "$YELLOW" "$msg" "$GREEN" "$NC"
 }
 
 # --- AVISO DE SEGURANÇA ---
