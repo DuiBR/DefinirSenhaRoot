@@ -18,17 +18,16 @@ else
   NC=''
 fi
 
-# Função para animação com spinner
+# Função para animação com spinner simples
 show_loading() {
   local msg="$1"
   local duration="$2"
   local spinner=('|' '/' '-' '\\')
-  echo -ne "${YELLOW}${msg} [${NC}"
+  echo -n "${YELLOW}${msg} [${NC}"
   for ((i=0; i<duration; i++)); do
     for s in "${spinner[@]}"; do
-      echo -ne "${GREEN}${s}${NC}"
+      echo -n "${GREEN}${s}${NC}"
       sleep 0.3
-      echo -ne "\b"
     done
   done
   echo -e "${GREEN}✓] Concluído! ✅${NC}"
@@ -48,7 +47,7 @@ validate_password() {
 confirm_password() {
   local pwd="$1"
   local confirm
-  echo -ne "${YELLOW}Confirme a senha: ${NC}"
+  echo -n "${YELLOW}Confirme a senha: ${NC}"
   read -r confirm
   if [[ "$pwd" != "$confirm" ]]; then
     echo -e "${RED}Erro: As senhas não coincidem! 🚫${NC}"
@@ -149,7 +148,7 @@ fi
 
 # Solicita senha de root (visível, com validação e proteção contra enter acidental)
 while true; do
-  echo -ne "${YELLOW}DEFINA A SENHA ROOT 🔐: ${NC}"
+  echo -n "${YELLOW}DEFINA A SENHA ROOT 🔐: ${NC}"
   read -r senha
   if [[ -z "${senha// /}" ]]; then
     echo -e "${RED}Erro: A senha não pode ser vazia! 🚫${NC}"
