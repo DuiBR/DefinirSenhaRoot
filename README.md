@@ -1,6 +1,6 @@
 # DefinirSenhaRoot
 
-✅ Script para definir a Senha root! 
+✅ Script para definir a Senha root!
 ✅ Libera todas as portas da VPS  
 ✅ Testado em Oracle e AWS, entre outras. 
 
