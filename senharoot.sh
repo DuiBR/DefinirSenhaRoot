@@ -3,27 +3,35 @@
 # Script para configurar autenticação root por senha com animações e estilo
 set -euo pipefail
 
-# Definição de cores
-RED='\033[1;31m'
-GREEN='\033[1;32m'
-YELLOW='\033[1;33m'
-WHITE='\033[1;37m'
-NC='\033[0m' # No Color
+# Verifica se o terminal suporta cores
+if [[ -t 1 ]]; then
+  RED='\033[1;31m'
+  GREEN='\033[1;32m'
+  YELLOW='\033[1;33m'
+  WHITE='\033[1;37m'
+  NC='\033[0m' # No Color
+else
+  RED=''
+  GREEN=''
+  YELLOW=''
+  WHITE=''
+  NC=''
+fi
 
-# Função para animação com spinner e check
+# Função para animação com spinner
 show_loading() {
   local msg="$1"
   local duration="$2"
+  local spinner=('|' '/' '-' '\\')
   echo -ne "${YELLOW}${msg} [${NC}"
   for ((i=0; i<duration; i++)); do
-    echo -ne "${GREEN}⏳${NC}"
-    sleep 0.5
-    echo -ne "\b\b\b\b"
-    echo -ne "${GREEN}✓${NC}"
-    sleep 0.1
-    echo -ne "\b\b"
+    for s in "${spinner[@]}"; do
+      echo -ne "${GREEN}${s}${NC}"
+      sleep 0.3
+      echo -ne "\b"
+    done
   done
-  echo -e "${GREEN}] Concluído! ✅${NC}"
+  echo -e "${GREEN}✓] Concluído! ✅${NC}"
 }
 
 # Função para validar senha (mínimo 8 caracteres, sem espaços)
