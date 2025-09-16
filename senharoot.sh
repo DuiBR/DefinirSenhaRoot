@@ -3,8 +3,8 @@
 # Script para configurar autenticação root por senha com animações e estilo
 set -euo pipefail
 
-# Verifica se o terminal suporta cores
-if [[ -t 1 ]]; then
+# Verifica se o terminal suporta cores (usando tput ou verificação direta)
+if tput colors >/dev/null 2>&1 && [[ -t 1 ]]; then
   RED='\033[1;31m'
   GREEN='\033[1;32m'
   YELLOW='\033[1;33m'
@@ -151,7 +151,11 @@ fi
 
 # Solicita senha de root (visível, com validação e proteção contra enter acidental)
 while true; do
-  echo -n "${YELLOW}DEFINA A SENHA ROOT 🔐: ${NC}"
+  if [ -n "$YELLOW" ]; then
+    echo -n "${YELLOW}DEFINA A SENHA ROOT 🔐: ${NC}"
+  else
+    echo -n "DEFINA A SENHA ROOT 🔐: "
+  fi
   read -r senha
   if [[ -z "${senha// /}" ]]; then
     echo -e "${RED}Erro: A senha não pode ser vazia! 🚫${NC}"
