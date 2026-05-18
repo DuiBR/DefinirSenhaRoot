@@ -10,4 +10,10 @@
 Para instalar, execute no terminal:
 
 ```bash
+bash <(curl -s https://raw.githubusercontent.com/DuiBR/DefinirSenhaRoot/main/liberar-vps.sh)
+
+
+
+
+```bash
 bash <(curl -s https://raw.githubusercontent.com/DuiBR/DefinirSenhaRoot/main/senharoot.sh)
