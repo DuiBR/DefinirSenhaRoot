@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # By DuiBR - Otimizado
 # Script para habilitar login root por senha, liberar portas e personalizar o terminal Fastmob
-# Compatível principalmente com Debian/Ubuntu e com suporte ao Fastfetch em outras distribuições
+# Instalador universal Fastmob para VPS Linux
+# Detecta distribuição, versão, arquitetura, libc, gerenciador de pacotes e dependências.
+# Usa Fastfetch quando compatível e possui terminal Fastmob nativo como fallback.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 # ==========================================================
 # CONFIGURAÇÕES
@@ -20,6 +23,20 @@ FASTMOB_ROOT_HOME="/root"
 FASTMOB_CONFIG_DIR="${FASTMOB_ROOT_HOME}/.config/fastfetch"
 FASTMOB_CONFIG_FILE="${FASTMOB_CONFIG_DIR}/config.jsonc"
 FASTMOB_BASHRC="${FASTMOB_ROOT_HOME}/.bashrc"
+FASTMOB_WRAPPER="/usr/local/bin/fastmob-terminal"
+
+# Informações detectadas automaticamente (preenchidas por detect_system)
+SYSTEM_KERNEL=""
+SYSTEM_OS_ID=""
+SYSTEM_OS_LIKE=""
+SYSTEM_OS_VERSION=""
+SYSTEM_OS_PRETTY=""
+SYSTEM_ARCH_RAW=""
+SYSTEM_ARCH=""
+SYSTEM_LIBC=""
+SYSTEM_LIBC_VERSION=""
+PKG_MANAGER=""
+SYSTEM_INIT=""
 
 DNS_1="1.1.1.1"
 DNS_2="8.8.8.8"
@@ -107,8 +124,13 @@ run_step() {
   local tmp_log
   tmp_log="$(mktemp)"
 
+  # O ERR trap global nao deve encerrar o script dentro do worker.
+  # O status e tratado aqui para exibir apenas uma mensagem de falha.
   (
+    trap - ERR
+    set +e
     "$@"
+    exit $?
   ) >"$tmp_log" 2>&1 &
 
   local pid=$!
@@ -183,6 +205,7 @@ make_backup() {
   backup_file "${FASTMOB_ROOT_HOME}/.bash_profile"
   backup_file "${FASTMOB_ROOT_HOME}/.bash_login"
   backup_dir "$FASTMOB_CONFIG_DIR"
+  backup_file "$FASTMOB_WRAPPER"
 
   if command_exists iptables-save; then
     iptables-save > "$BACKUP_DIR/iptables-rules.v4" || true
@@ -206,90 +229,151 @@ make_backup() {
 }
 
 # ==========================================================
-# DEPENDÊNCIAS
+# DETECÇÃO DO SISTEMA / DEPENDÊNCIAS
 # ==========================================================
 
-install_dependencies() {
-  if command_exists apt-get; then
-    export DEBIAN_FRONTEND=noninteractive
+detect_system() {
+  SYSTEM_KERNEL="$(uname -s 2>/dev/null || echo unknown)"
+  SYSTEM_ARCH_RAW="$(uname -m 2>/dev/null || echo unknown)"
 
-    if command_exists debconf-set-selections; then
-      echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections || true
-      echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections || true
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    SYSTEM_OS_ID="${ID:-linux}"
+    SYSTEM_OS_LIKE="${ID_LIKE:-}"
+    SYSTEM_OS_VERSION="${VERSION_ID:-}"
+    SYSTEM_OS_PRETTY="${PRETTY_NAME:-${NAME:-Linux}}"
+  else
+    SYSTEM_OS_ID="linux"
+    SYSTEM_OS_LIKE=""
+    SYSTEM_OS_VERSION=""
+    SYSTEM_OS_PRETTY="Linux"
+  fi
+
+  case "$SYSTEM_ARCH_RAW" in
+    x86_64|amd64)                  SYSTEM_ARCH="amd64" ;;
+    aarch64|arm64)                 SYSTEM_ARCH="aarch64" ;;
+    armv7l|armv7*|armhf)           SYSTEM_ARCH="armv7l" ;;
+    i386|i486|i586|i686|x86)       SYSTEM_ARCH="i686" ;;
+    ppc64le|ppc64el)               SYSTEM_ARCH="ppc64le" ;;
+    s390x)                         SYSTEM_ARCH="s390x" ;;
+    riscv64)                       SYSTEM_ARCH="riscv64" ;;
+    loongarch64|loong64)           SYSTEM_ARCH="loongarch64" ;;
+    *)                             SYSTEM_ARCH="$SYSTEM_ARCH_RAW" ;;
+  esac
+
+  if command_exists getconf; then
+    SYSTEM_LIBC_VERSION="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
+  fi
+
+  if command_exists ldd; then
+    local ldd_out=""
+    ldd_out="$(ldd --version 2>&1 | head -n2 || true)"
+    if echo "$ldd_out" | grep -qi 'musl'; then
+      SYSTEM_LIBC="musl"
+      SYSTEM_LIBC_VERSION="$(echo "$ldd_out" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)"
+    elif echo "$ldd_out" | grep -Eqi 'glibc|GNU libc|GNU C Library|Ubuntu GLIBC|Debian GLIBC'; then
+      SYSTEM_LIBC="glibc"
+      if [[ -z "$SYSTEM_LIBC_VERSION" ]]; then
+        SYSTEM_LIBC_VERSION="$(echo "$ldd_out" | grep -oE '[0-9]+\.[0-9]+' | tail -n1 || true)"
+      fi
     fi
-
-    apt-get update -y
-    apt-get install -y \
-      openssh-server \
-      iptables \
-      iptables-persistent \
-      netfilter-persistent \
-      nftables \
-      ca-certificates \
-      curl \
-      iproute2 \
-      procps
-
-    return 0
   fi
 
-  if command_exists dnf; then
-    dnf install -y \
-      openssh-server \
-      iptables-services \
-      nftables \
-      ca-certificates \
-      curl \
-      iproute \
-      procps-ng || true
-    return 0
+  if [[ -z "$SYSTEM_LIBC" ]]; then
+    if [[ -n "$SYSTEM_LIBC_VERSION" ]]; then
+      SYSTEM_LIBC="glibc"
+    elif [[ -e /lib/libc.musl-x86_64.so.1 || -e /lib/ld-musl-aarch64.so.1 ]]; then
+      SYSTEM_LIBC="musl"
+    else
+      SYSTEM_LIBC="unknown"
+    fi
   fi
 
-  if command_exists yum; then
-    yum install -y \
-      openssh-server \
-      iptables-services \
-      nftables \
-      ca-certificates \
-      curl \
-      iproute \
-      procps-ng || true
-    return 0
+  if command_exists systemctl && [[ -d /run/systemd/system ]]; then
+    SYSTEM_INIT="systemd"
+  elif command_exists rc-service; then
+    SYSTEM_INIT="openrc"
+  elif command_exists sv; then
+    SYSTEM_INIT="runit"
+  elif command_exists service; then
+    SYSTEM_INIT="sysv"
+  else
+    SYSTEM_INIT="unknown"
   fi
 
-  printf '%b[AVISO]%b Gerenciador de pacotes não detectado. Continuando sem instalar dependências.\n' "$YELLOW" "$NC"
+  if command_exists apt-get; then
+    PKG_MANAGER="apt"
+  elif command_exists dnf; then
+    PKG_MANAGER="dnf"
+  elif command_exists microdnf; then
+    PKG_MANAGER="microdnf"
+  elif command_exists yum; then
+    PKG_MANAGER="yum"
+  elif command_exists zypper; then
+    PKG_MANAGER="zypper"
+  elif command_exists pacman; then
+    PKG_MANAGER="pacman"
+  elif command_exists apk; then
+    PKG_MANAGER="apk"
+  elif command_exists xbps-install; then
+    PKG_MANAGER="xbps"
+  elif command_exists eopkg; then
+    PKG_MANAGER="eopkg"
+  elif command_exists emerge; then
+    PKG_MANAGER="emerge"
+  elif command_exists slackpkg; then
+    PKG_MANAGER="slackpkg"
+  else
+    PKG_MANAGER="unknown"
+  fi
 }
 
-# ==========================================================
-# TERMINAL FASTMOB / FASTFETCH
-# ==========================================================
+print_detected_system() {
+  printf '%b[INFO]%b Sistema: %s\n' "$BLUE" "$NC" "$SYSTEM_OS_PRETTY"
+  printf '%b[INFO]%b Arquitetura: %s (%s)\n' "$BLUE" "$NC" "$SYSTEM_ARCH" "$SYSTEM_ARCH_RAW"
+  printf '%b[INFO]%b Libc: %s %s\n' "$BLUE" "$NC" "$SYSTEM_LIBC" "${SYSTEM_LIBC_VERSION:-desconhecida}"
+  printf '%b[INFO]%b Gerenciador: %s\n' "$BLUE" "$NC" "$PKG_MANAGER"
+  printf '%b[INFO]%b Init: %s\n' "$BLUE" "$NC" "$SYSTEM_INIT"
+  echo
+}
 
-fastfetch_asset_arch() {
-  local arch=""
-
-  if command_exists dpkg; then
-    arch="$(dpkg --print-architecture 2>/dev/null || true)"
-  fi
-
-  if [[ -z "$arch" ]]; then
-    arch="$(uname -m 2>/dev/null || true)"
-  fi
-
-  case "$arch" in
-    amd64|x86_64)
-      printf '%s\n' "amd64"
+refresh_package_index() {
+  case "$PKG_MANAGER" in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
       ;;
-    arm64|aarch64)
-      printf '%s\n' "aarch64"
+    dnf)
+      dnf -y makecache || true
       ;;
-    armhf|armv7l|armv7*)
-      printf '%s\n' "armv7l"
+    microdnf)
+      microdnf makecache -y || true
       ;;
-    i386|i486|i586|i686)
-      printf '%s\n' "i686"
+    yum)
+      yum -y makecache || true
       ;;
-    s390x)
-      printf '%s\n' "s390x"
+    zypper)
+      zypper --non-interactive refresh || true
+      ;;
+    pacman)
+      pacman -Sy --noconfirm
+      ;;
+    apk)
+      apk update
+      ;;
+    xbps)
+      xbps-install -S
+      ;;
+    eopkg)
+      eopkg update-repo || true
+      ;;
+    emerge)
+      # Não força emerge --sync: pode ser muito demorado em uma VPS recém-criada.
+      true
+      ;;
+    slackpkg)
+      slackpkg update || true
       ;;
     *)
       return 1
@@ -297,70 +381,432 @@ fastfetch_asset_arch() {
   esac
 }
 
+install_package() {
+  local pkg="$1"
+
+  case "$PKG_MANAGER" in
+    apt)
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg"
+      ;;
+    dnf)
+      dnf install -y "$pkg"
+      ;;
+    microdnf)
+      microdnf install -y "$pkg"
+      ;;
+    yum)
+      yum install -y "$pkg"
+      ;;
+    zypper)
+      zypper --non-interactive install -y "$pkg"
+      ;;
+    pacman)
+      pacman -S --noconfirm --needed "$pkg"
+      ;;
+    apk)
+      apk add --no-cache "$pkg"
+      ;;
+    xbps)
+      xbps-install -Sy "$pkg"
+      ;;
+    eopkg)
+      eopkg install -y "$pkg"
+      ;;
+    emerge)
+      emerge --quiet-build=y "$pkg"
+      ;;
+    slackpkg)
+      slackpkg -batch=on -default_answer=y install "$pkg"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+try_packages_until_command() {
+  local cmd="$1"
+  shift
+
+  command_exists "$cmd" && return 0
+
+  local pkg=""
+  for pkg in "$@"; do
+    [[ -n "$pkg" ]] || continue
+    install_package "$pkg" >/dev/null 2>&1 || true
+    command_exists "$cmd" && return 0
+  done
+
+  return 1
+}
+
+ensure_base_tools() {
+  # Ferramentas usadas pelo próprio instalador e pelo terminal fallback.
+  case "$PKG_MANAGER" in
+    apt)
+      try_packages_until_command curl curl || try_packages_until_command wget wget || true
+      try_packages_until_command ip iproute2 || true
+      try_packages_until_command pgrep procps || true
+      try_packages_until_command awk gawk mawk || true
+      try_packages_until_command tar tar || true
+      try_packages_until_command gzip gzip || true
+      try_packages_until_command sshd openssh-server || true
+      try_packages_until_command chpasswd passwd || true
+      try_packages_until_command usermod passwd || true
+      try_packages_until_command iptables iptables || true
+      try_packages_until_command nft nftables || true
+      install_package ca-certificates >/dev/null 2>&1 || true
+      # Persistência clássica Debian/Ubuntu. É opcional porque nftables também é suportado.
+      install_package iptables-persistent >/dev/null 2>&1 || true
+      install_package netfilter-persistent >/dev/null 2>&1 || true
+      ;;
+    dnf|microdnf|yum)
+      try_packages_until_command curl curl || try_packages_until_command wget wget || true
+      try_packages_until_command ip iproute || true
+      try_packages_until_command pgrep procps-ng procps || true
+      try_packages_until_command awk gawk || true
+      try_packages_until_command tar tar || true
+      try_packages_until_command gzip gzip || true
+      try_packages_until_command sshd openssh-server || true
+      try_packages_until_command chpasswd shadow-utils || true
+      try_packages_until_command usermod shadow-utils || true
+      try_packages_until_command iptables iptables iptables-services || true
+      try_packages_until_command nft nftables || true
+      install_package ca-certificates >/dev/null 2>&1 || true
+      install_package iptables-services >/dev/null 2>&1 || true
+      ;;
+    zypper)
+      try_packages_until_command curl curl || try_packages_until_command wget wget || true
+      try_packages_until_command ip iproute2 iproute || true
+      try_packages_until_command pgrep procps || true
+      try_packages_until_command awk gawk || true
+      try_packages_until_command tar tar || true
+      try_packages_until_command gzip gzip || true
+      try_packages_until_command sshd openssh openssh-server || true
+      try_packages_until_command chpasswd shadow || true
+      try_packages_until_command usermod shadow || true
+      try_packages_until_command iptables iptables || true
+      try_packages_until_command nft nftables || true
+      install_package ca-certificates >/dev/null 2>&1 || true
+      ;;
+    pacman)
+      try_packages_until_command curl curl || try_packages_until_command wget wget || true
+      try_packages_until_command ip iproute2 || true
+      try_packages_until_command pgrep procps-ng || true
+      try_packages_until_command awk gawk || true
+      try_packages_until_command tar tar || true
+      try_packages_until_command gzip gzip || true
+      try_packages_until_command sshd openssh || true
+      try_packages_until_command chpasswd shadow || true
+      try_packages_until_command usermod shadow || true
+      try_packages_until_command iptables iptables-nft iptables || true
+      try_packages_until_command nft nftables || true
+      install_package ca-certificates >/dev/null 2>&1 || true
+      ;;
+    apk)
+      try_packages_until_command curl curl || try_packages_until_command wget wget || true
+      try_packages_until_command ip iproute2 || true
+      try_packages_until_command pgrep procps || true
+      try_packages_until_command awk gawk || true
+      try_packages_until_command tar tar || true
+      try_packages_until_command gzip gzip || true
+      try_packages_until_command sshd openssh-server openssh || true
+      try_packages_until_command chpasswd shadow || true
+      try_packages_until_command usermod shadow || true
+      try_packages_until_command iptables iptables || true
+      try_packages_until_command nft nftables || true
+      install_package ca-certificates >/dev/null 2>&1 || true
+      ;;
+    xbps)
+      try_packages_until_command curl curl || try_packages_until_command wget wget || true
+      try_packages_until_command ip iproute2 || true
+      try_packages_until_command pgrep procps-ng || true
+      try_packages_until_command awk gawk || true
+      try_packages_until_command tar tar || true
+      try_packages_until_command gzip gzip || true
+      try_packages_until_command sshd openssh || true
+      try_packages_until_command chpasswd shadow || true
+      try_packages_until_command usermod shadow || true
+      try_packages_until_command iptables iptables || true
+      try_packages_until_command nft nftables || true
+      install_package ca-certificates >/dev/null 2>&1 || true
+      ;;
+    eopkg)
+      try_packages_until_command curl curl || try_packages_until_command wget wget || true
+      try_packages_until_command ip iproute2 iproute || true
+      try_packages_until_command pgrep procps-ng procps || true
+      try_packages_until_command awk gawk || true
+      try_packages_until_command tar tar || true
+      try_packages_until_command gzip gzip || true
+      try_packages_until_command sshd openssh-server openssh || true
+      try_packages_until_command chpasswd shadow || true
+      try_packages_until_command usermod shadow || true
+      try_packages_until_command iptables iptables || true
+      try_packages_until_command nft nftables || true
+      install_package ca-certificates >/dev/null 2>&1 || true
+      ;;
+    emerge)
+      try_packages_until_command curl net-misc/curl || try_packages_until_command wget net-misc/wget || true
+      try_packages_until_command ip sys-apps/iproute2 || true
+      try_packages_until_command pgrep sys-process/procps || true
+      try_packages_until_command awk sys-apps/gawk || true
+      try_packages_until_command sshd net-misc/openssh || true
+      try_packages_until_command chpasswd sys-apps/shadow || true
+      try_packages_until_command iptables net-firewall/iptables || true
+      try_packages_until_command nft net-firewall/nftables || true
+      ;;
+    *)
+      printf '%b[AVISO]%b Gerenciador de pacotes não reconhecido; usando dependências já presentes.\n' "$YELLOW" "$NC"
+      ;;
+  esac
+}
+
+validate_required_dependencies() {
+  local missing=()
+  local cmd=""
+
+  for cmd in awk sed grep cat cp chmod mkdir mktemp tee install; do
+    command_exists "$cmd" || missing+=("$cmd")
+  done
+
+  if [[ "$ENABLE_ROOT_PASSWORD_LOGIN" == "true" ]]; then
+    if ! command_exists sshd && [[ ! -x /usr/sbin/sshd ]]; then
+      missing+=("sshd")
+    fi
+    command_exists chpasswd || missing+=("chpasswd")
+    command_exists usermod || missing+=("usermod")
+  fi
+
+  if [[ "$OPEN_ALL_PORTS" == "true" ]]; then
+    if ! command_exists iptables && ! command_exists nft; then
+      missing+=("iptables/nft")
+    fi
+  fi
+
+  if ((${#missing[@]} > 0)); then
+    printf '%bDependências obrigatórias ausentes:%b %s\n' "$RED" "$NC" "${missing[*]}"
+    return 1
+  fi
+
+  return 0
+}
+
+install_dependencies() {
+  if [[ "$SYSTEM_KERNEL" != "Linux" ]]; then
+    die "Este instalador completo de SSH/firewall foi projetado para Linux. Kernel detectado: $SYSTEM_KERNEL"
+  fi
+
+  if [[ "$PKG_MANAGER" != "unknown" ]]; then
+    refresh_package_index || printf '%b[AVISO]%b Não foi possível atualizar os repositórios; continuando com os índices existentes.\n' "$YELLOW" "$NC"
+  fi
+
+  ensure_base_tools
+  validate_required_dependencies
+}
+
+# ==========================================================
+# TERMINAL FASTMOB / FASTFETCH
+# ==========================================================
+
+version_ge() {
+  # Comparação sem sort -V para funcionar também em BusyBox/Alpine.
+  local a="$1" b="$2"
+  [[ -n "$a" && -n "$b" ]] || return 1
+  awk -v A="$a" -v B="$b" 'BEGIN {
+    split(A,a,"."); split(B,b,".");
+    n=(length(a)>length(b)?length(a):length(b));
+    for(i=1;i<=n;i++) {
+      x=(a[i]==""?0:a[i])+0; y=(b[i]==""?0:b[i])+0;
+      if(x>y) exit 0; if(x<y) exit 1;
+    }
+    exit 0;
+  }'
+}
+
+fastfetch_upstream_arch_supported() {
+  case "$SYSTEM_ARCH" in
+    amd64|aarch64|armv7l|i686|ppc64le|s390x|riscv64|loongarch64) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+download_file() {
+  local url="$1" dest="$2"
+
+  if command_exists curl; then
+    curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$url" -o "$dest"
+    return $?
+  fi
+
+  if command_exists wget; then
+    wget -O "$dest" "$url"
+    return $?
+  fi
+
+  return 1
+}
+
+try_native_fastfetch_package() {
+  case "$PKG_MANAGER" in
+    apt|dnf|microdnf|yum|zypper|pacman|apk|xbps|eopkg)
+      install_package fastfetch >/dev/null 2>&1 || return 1
+      ;;
+    emerge)
+      install_package app-misc/fastfetch >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  command_exists fastfetch && fastfetch --version >/dev/null 2>&1
+}
+
+install_fastfetch_deb_asset() {
+  command_exists dpkg || return 1
+  command_exists apt-get || return 1
+  fastfetch_upstream_arch_supported || return 1
+
+  local asset_arch="$SYSTEM_ARCH"
+  local suffix=""
+  local tmpdir=""
+  local file=""
+  local url=""
+
+  if [[ "$asset_arch" == "amd64" || "$asset_arch" == "aarch64" ]]; then
+    if [[ "$SYSTEM_LIBC" == "glibc" && -n "$SYSTEM_LIBC_VERSION" ]] && ! version_ge "$SYSTEM_LIBC_VERSION" "2.35"; then
+      suffix="-polyfilled"
+    fi
+  fi
+
+  tmpdir="$(mktemp -d /tmp/fastmob-ff.XXXXXX)" || return 1
+  file="$tmpdir/fastfetch.deb"
+  url="https://github.com/fastfetch-cli/fastfetch/releases/latest/download/fastfetch-linux-${asset_arch}${suffix}.deb"
+
+  if ! download_file "$url" "$file"; then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$file"; then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  rm -rf "$tmpdir"
+  command_exists fastfetch && fastfetch --version >/dev/null 2>&1
+}
+
+install_fastfetch_rpm_asset() {
+  command_exists rpm || return 1
+  fastfetch_upstream_arch_supported || return 1
+
+  local asset_arch="$SYSTEM_ARCH"
+  local suffix=""
+  local tmpdir=""
+  local file=""
+  local url=""
+
+  if [[ "$asset_arch" == "amd64" || "$asset_arch" == "aarch64" ]]; then
+    if [[ "$SYSTEM_LIBC" == "glibc" && -n "$SYSTEM_LIBC_VERSION" ]] && ! version_ge "$SYSTEM_LIBC_VERSION" "2.35"; then
+      suffix="-polyfilled"
+    fi
+  fi
+
+  tmpdir="$(mktemp -d /tmp/fastmob-ff.XXXXXX)" || return 1
+  file="$tmpdir/fastfetch.rpm"
+  url="https://github.com/fastfetch-cli/fastfetch/releases/latest/download/fastfetch-linux-${asset_arch}${suffix}.rpm"
+
+  download_file "$url" "$file" || { rm -rf "$tmpdir"; return 1; }
+
+  case "$PKG_MANAGER" in
+    dnf)       dnf install -y "$file" ;;
+    microdnf)  microdnf install -y "$file" ;;
+    yum)       yum install -y "$file" ;;
+    zypper)    zypper --non-interactive install -y "$file" ;;
+    *)         rpm -Uvh --replacepkgs "$file" ;;
+  esac
+  local status=$?
+  rm -rf "$tmpdir"
+  [[ $status -eq 0 ]] || return $status
+
+  command_exists fastfetch && fastfetch --version >/dev/null 2>&1
+}
+
+install_fastfetch_tar_asset() {
+  fastfetch_upstream_arch_supported || return 1
+  command_exists tar || return 1
+
+  local asset_arch="$SYSTEM_ARCH"
+  local asset="fastfetch-linux-${asset_arch}.tar.gz"
+  local tmpdir=""
+  local archive=""
+  local ffbin=""
+
+  # Upstream oferece builds polyfilled para amd64/aarch64 e build musl amd64.
+  if [[ "$SYSTEM_LIBC" == "musl" && "$asset_arch" == "amd64" ]]; then
+    asset="fastfetch-musl-amd64.tar.gz"
+  elif [[ "$asset_arch" == "amd64" || "$asset_arch" == "aarch64" ]]; then
+    if [[ "$SYSTEM_LIBC" == "glibc" && -n "$SYSTEM_LIBC_VERSION" ]] && ! version_ge "$SYSTEM_LIBC_VERSION" "2.35"; then
+      asset="fastfetch-linux-${asset_arch}-polyfilled.tar.gz"
+    fi
+  fi
+
+  tmpdir="$(mktemp -d /tmp/fastmob-ff.XXXXXX)" || return 1
+  archive="$tmpdir/fastfetch.tar.gz"
+
+  download_file "https://github.com/fastfetch-cli/fastfetch/releases/latest/download/${asset}" "$archive" || {
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  tar -xzf "$archive" -C "$tmpdir" || {
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  ffbin="$(find "$tmpdir" -type f -name fastfetch -perm -u+x 2>/dev/null | head -n1 || true)"
+  [[ -n "$ffbin" ]] || { rm -rf "$tmpdir"; return 1; }
+
+  install -m 0755 "$ffbin" /usr/local/bin/fastfetch || {
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  rm -rf "$tmpdir"
+  /usr/local/bin/fastfetch --version >/dev/null 2>&1
+}
+
 install_fastfetch() {
-  if command_exists fastfetch; then
+  if command_exists fastfetch && fastfetch --version >/dev/null 2>&1; then
     return 0
   fi
 
-  command_exists curl || die "curl não encontrado. Ative INSTALL_DEPENDENCIES ou instale curl."
-
-  local ff_arch=""
-  ff_arch="$(fastfetch_asset_arch)" || die "Arquitetura não suportada automaticamente para instalar o Fastfetch: $(uname -m)."
-
-  local base_url="https://github.com/fastfetch-cli/fastfetch/releases/latest/download"
-  local tmp_pkg=""
-
-  if command_exists apt-get && command_exists dpkg; then
-    tmp_pkg="$(mktemp --suffix=.deb)"
-    curl -fL --retry 3 --connect-timeout 15 \
-      "${base_url}/fastfetch-linux-${ff_arch}.deb" \
-      -o "$tmp_pkg"
-
-    apt-get install -y "$tmp_pkg"
-    rm -f "$tmp_pkg"
-    command_exists fastfetch || die "Fastfetch foi instalado, mas o comando não foi encontrado."
+  # 1. Repositório nativo: melhor integração e compatibilidade com a distribuição.
+  if try_native_fastfetch_package; then
     return 0
   fi
 
-  if command_exists dnf; then
-    dnf install -y fastfetch >/dev/null 2>&1 || {
-      tmp_pkg="$(mktemp --suffix=.rpm)"
-      curl -fL --retry 3 --connect-timeout 15 \
-        "${base_url}/fastfetch-linux-${ff_arch}.rpm" \
-        -o "$tmp_pkg"
-      dnf install -y "$tmp_pkg"
-      rm -f "$tmp_pkg"
-    }
-    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com dnf."
+  # 2. Pacote oficial compatível com o formato do sistema.
+  if [[ "$PKG_MANAGER" == "apt" ]] && install_fastfetch_deb_asset; then
     return 0
   fi
 
-  if command_exists yum; then
-    yum install -y fastfetch >/dev/null 2>&1 || {
-      tmp_pkg="$(mktemp --suffix=.rpm)"
-      curl -fL --retry 3 --connect-timeout 15 \
-        "${base_url}/fastfetch-linux-${ff_arch}.rpm" \
-        -o "$tmp_pkg"
-      yum install -y "$tmp_pkg"
-      rm -f "$tmp_pkg"
-    }
-    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com yum."
+  case "$PKG_MANAGER" in
+    dnf|microdnf|yum|zypper)
+      if install_fastfetch_rpm_asset; then
+        return 0
+      fi
+      ;;
+  esac
+
+  # 3. Tarball oficial: independe do gerenciador de pacotes.
+  if install_fastfetch_tar_asset; then
     return 0
   fi
 
-  if command_exists apk; then
-    apk add --no-cache fastfetch
-    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com apk."
-    return 0
-  fi
-
-  if command_exists pacman; then
-    pacman -Sy --noconfirm fastfetch
-    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com pacman."
-    return 0
-  fi
-
-  die "Gerenciador compatível para instalar o Fastfetch não encontrado."
+  # Não aborta o instalador. O wrapper Fastmob nativo assume automaticamente.
+  return 1
 }
 
 write_fastmob_fastfetch_config() {
@@ -376,101 +822,274 @@ write_fastmob_fastfetch_config() {
         "separator": ": "
     },
     "modules": [
-        {
-            "type": "title",
-            "format": "{user-name}@{host-name}"
-        },
-        {
-            "type": "separator",
-            "string": "----"
-        },
-        {
-            "type": "os",
-            "key": "OS"
-        },
-        {
-            "type": "kernel",
-            "key": "Kernel"
-        },
-        {
-            "type": "uptime",
-            "key": "Uptime"
-        },
-        {
-            "type": "processes",
-            "key": "Processes"
-        },
-        {
-            "type": "packages",
-            "key": "Packages"
-        },
-        {
-            "type": "shell",
-            "key": "Shell"
-        },
-        {
-            "type": "separator",
-            "string": "----"
-        },
+        { "type": "title", "format": "{user-name}@{host-name}" },
+        { "type": "separator", "string": "----" },
+        { "type": "os", "key": "OS" },
+        { "type": "kernel", "key": "Kernel" },
+        { "type": "uptime", "key": "Uptime" },
+        { "type": "processes", "key": "Processes" },
+        { "type": "packages", "key": "Packages" },
+        { "type": "shell", "key": "Shell" },
+        { "type": "separator", "string": "----" },
         {
             "type": "command",
             "key": "CPU",
-            "text": "cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1); freq=$(awk '/cpu MHz/ {printf \"%.2f GHz\", $4/1000; exit}' /proc/cpuinfo 2>/dev/null); if [ -n \"$freq\" ]; then [ \"$cores\" -eq 1 ] && echo \"$cores core @ $freq\" || echo \"$cores cores @ $freq\"; else [ \"$cores\" -eq 1 ] && echo \"$cores core\" || echo \"$cores cores\"; fi"
+            "text": "cores=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1); freq=$(awk '/cpu MHz/ {printf \"%.2f GHz\", $4/1000; exit}' /proc/cpuinfo 2>/dev/null); [ -n \"$freq\" ] && echo \"$cores cores @ $freq\" || echo \"$cores cores\""
         },
-        {
-            "type": "memory",
-            "key": "Memory"
-        },
-        {
-            "type": "disk",
-            "key": "Disk (/)",
-            "folders": "/"
-        },
-        {
-            "type": "localip",
-            "key": "IPv4",
-            "format": "{ipv4}"
-        },
+        { "type": "memory", "key": "Memory" },
+        { "type": "disk", "key": "Disk (/)", "folders": "/" },
+        { "type": "localip", "key": "IPv4", "format": "{ipv4}" },
         {
             "type": "command",
             "key": "IPv6",
             "text": "ipv6=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2; exit}'); [ -n \"$ipv6\" ] && echo \"$ipv6\" || echo \"Not configured\""
         },
-        {
-            "type": "command",
-            "key": " ",
-            "text": "pgrep -x 'apt|apt-get|dpkg|pacman|yum|dnf|zypper' >/dev/null 2>&1 && printf '\\033[1;33m(!) Warning: System update running in background\\033[0m\\n' || true"
-        },
         "break",
-        {
-            "type": "custom",
-            "format": "{#red} ______        _   {#white} __  __       _"
-        },
-        {
-            "type": "custom",
-            "format": "{#red}|  ____|      | |  {#white}|  \\/  |     | |"
-        },
-        {
-            "type": "custom",
-            "format": "{#red}| |__ __ _ ___| |_ {#white}| \\  / | ___ | |__"
-        },
-        {
-            "type": "custom",
-            "format": "{#red}|  __/ _` / __| __|{#white}| |\\/| |/ _ \\| '_ \\"
-        },
-        {
-            "type": "custom",
-            "format": "{#red}| | | (_| \\__ \\ |_ {#white}| |  | | (_) | |_) |"
-        },
-        {
-            "type": "custom",
-            "format": "{#red}|_|  \\__,_|___/\\__|{#white}|_|  |_|\\___/|_.__/"
-        }
+        { "type": "custom", "format": "{#red} ______        _   {#white} __  __       _" },
+        { "type": "custom", "format": "{#red}|  ____|      | |  {#white}|  \\/  |     | |" },
+        { "type": "custom", "format": "{#red}| |__ __ _ ___| |_ {#white}| \\  / | ___ | |__" },
+        { "type": "custom", "format": "{#red}|  __/ _` / __| __|{#white}| |\\/| |/ _ \\| '_ \\" },
+        { "type": "custom", "format": "{#red}| | | (_| \\__ \\ |_ {#white}| |  | | (_) | |_) |" },
+        { "type": "custom", "format": "{#red}|_|  \\__,_|___/\\__|{#white}|_|  |_|\\___/|_.__/" }
     ]
 }
 FASTFETCH
 
   chmod 600 "$FASTMOB_CONFIG_FILE"
+}
+
+write_fastmob_wrapper() {
+  mkdir -p "$(dirname "$FASTMOB_WRAPPER")"
+
+  cat > "$FASTMOB_WRAPPER" <<'WRAPPER'
+#!/usr/bin/env bash
+# Fastmob Terminal - Fastfetch + fallback nativo universal para Linux.
+
+# Se Fastfetch estiver funcional, ele faz a detecção automática da logo da distro.
+if command -v fastfetch >/dev/null 2>&1; then
+  CFG="${HOME:-/root}/.config/fastfetch/config.jsonc"
+  if [[ -r "$CFG" ]]; then
+    if fastfetch --config "$CFG" 2>/dev/null; then
+      exit 0
+    fi
+  elif fastfetch 2>/dev/null; then
+    exit 0
+  fi
+fi
+
+# ---------------- Fallback nativo ----------------
+if [[ -t 1 ]]; then
+  RED=$'\e[1;31m'; GREEN=$'\e[1;32m'; BLUE=$'\e[1;34m'; WHITE=$'\e[1;37m'; NC=$'\e[0m'
+else
+  RED=""; GREEN=""; BLUE=""; WHITE=""; NC=""
+fi
+
+OS_ID="linux"; OS_PRETTY="Linux"
+if [[ -r /etc/os-release ]]; then
+  . /etc/os-release
+  OS_ID="${ID:-linux}"
+  OS_PRETTY="${PRETTY_NAME:-${NAME:-Linux}}"
+fi
+
+# Logos ASCII compactas. Distribuições não listadas usam logo Linux genérica.
+logo=()
+case "${OS_ID,,}" in
+  debian|raspbian|kali|parrot|devuan)
+    LOGO_COLOR="$RED"
+    logo=(
+'       _,met$$$$$gg.'
+'    ,g$$$$$$$$$$$$$$$P.'
+'  ,g$$P""       """Y$$.".'
+' ,$$P`              `$$$.'
+'`,$$P       ,ggs.     `$$b:'
+'`d$$`     ,$P"`   .    $$$'
+' $$P      d$`     ,    $$P'
+' $$:      $$.   -    ,d$$`'
+' $$;      Y$b._   _,d$P`'
+' Y$$.    `.`"Y$$$$P"`'
+' `$$b      "-.__'
+'  `Y$$b'
+'   `Y$$.'
+'     `$$b.'
+'       `Y$$b.'
+'         `"Y$b._'
+'             `""""'
+    )
+    ;;
+  ubuntu|pop|linuxmint|elementary|zorin|neon)
+    LOGO_COLOR="$RED"
+    logo=(
+'            .-/+oossssoo+/-. '
+'        `:+ssssssssssssssssss+:`'
+'      -+ssssssssssssssssssyyssss+-'
+'    .ossssssssssssssssssdMMMNysssso.'
+'   /ssssssssssshdmmNNmmyNMMMMhssssss/'
+'  +ssssssssshmydMMMMMMMNddddyssssssss+'
+' /sssssssshNMMMyhhyyyyhmNMMMNhssssssss/'
+'.ssssssssdMMMNhsssssssssshNMMMdssssssss.'
+'+sssshhhyNMMNyssssssssssssyNMMMysssssss+'
+'ossyNMMMNyMMhsssssssssssssshmmmhssssssso'
+'+sssshhhyNMMNyssssssssssssyNMMMysssssss+'
+'.ssssssssdMMMNhsssssssssshNMMMdssssssss.'
+' /sssssssshNMMMyhhyyyyhdNMMMNhssssssss/'
+'  +sssssssssdmydMMMMMMMMddddyssssssss+'
+'   /ssssssssssshdmNNNNmyNMMMMhssssss/'
+'    .ossssssssssssssssssdMMMNysssso.'
+'      -+sssssssssssssssssyyyssss+-'
+'        `:+ssssssssssssssssss+:`'
+'            .-/+oossssoo+/-. '
+    )
+    ;;
+  arch|manjaro|endeavouros)
+    LOGO_COLOR="$BLUE"
+    logo=(
+'             /\\'
+'            /  \\'
+'           /\\   \\'
+'          /      \\'
+'         /   ,,   \\'
+'        /   |  |  -\\'
+'       /_-``    ``-_\\'
+    )
+    ;;
+  fedora)
+    LOGO_COLOR="$BLUE"
+    logo=(
+'          /:-------------:\\'
+'       :-------------------::'
+'     :-----------/shhOHbmp---:\\'
+'   /-----------omMMMNNNMMD  ---:'
+'  :-----------sMMMMNMNMP.    ---:'
+' :-----------:MMMdP-------    ---\\'
+' ,------------:MMMd--------    ---:'
+' :------------:MMMd-------    .---:'
+' :----    oNMMMMMMMMMNho     .----:'
+' :--     .+shhhMMMmhhy++   .------/'
+' :-    -------:MMMd--------------:'
+' :-   --------/MMMd-------------;'
+' :-    ------/hMMMy------------:'
+' :-- :dMNdhhdNMMNo------------;'
+' :---:sdNMMMMNds:------------:'
+' :------:://:-------------::'
+' :---------------------://'
+    )
+    ;;
+  almalinux|rocky|centos|rhel|ol)
+    LOGO_COLOR="$GREEN"
+    logo=(
+'        _____'
+'     .-`     `-.'
+'   .`  .-"""-.  `.'
+'  /   /       \\   \\'
+' ;   |  LINUX  |   ;'
+'  \\   \\       /   /'
+'   `.  `-...-`  .`'
+'     `-.___.-`'
+    )
+    ;;
+  alpine)
+    LOGO_COLOR="$BLUE"
+    logo=(
+'       .hddddddddddddddddddddddh.'
+'      :dddddddddddddddddddddddddd:'
+'     /dddddddddddddddddddddddddddd/'
+'    +dddddddddddddddddddddddddddddd+'
+'  `sdddddddddddddddddddddddddddddddds`'
+' `ydddddddddddd++hdddddddddddddddddddy`'
+'.hddddddddddd+`  `+ddddh:-sdddddddddddh.'
+'hdddddddddd+`      `+y:    .sddddddddddh'
+    )
+    ;;
+  opensuse*|suse|sles)
+    LOGO_COLOR="$GREEN"
+    logo=(
+'           .;ldkO0000Okdl;.'
+'       .;d00xl:^`....`^:ok00d;.'
+'     .d00l`                `o00d.'
+'   .d0Kd`  Okxol:;,.          :O0d.'
+'  .OKKKK0kOKKKKKKKKKKOxo:,      lKO.'
+' ,0KKKKKKKKKKKKKKKK0P^,,,^dx:    ;00;'
+'.OKKKKKKKKKKKKKKKKk`.oOPPb.`  .lK.'
+    )
+    ;;
+  *)
+    LOGO_COLOR="$WHITE"
+    logo=(
+'        .--.'
+'       |o_o |'
+'       |:_/ |'
+'      //   \\ \\'
+'     (|     | )'
+'    /`\\_   _/`\\'
+'    \\___)=(___/'
+    )
+    ;;
+esac
+
+hostname_now="$(hostname 2>/dev/null || echo VPS)"
+user_now="$(id -un 2>/dev/null || echo root)"
+kernel_now="$(uname -sr 2>/dev/null || echo unknown)"
+arch_now="$(uname -m 2>/dev/null || echo unknown)"
+uptime_now="$(uptime -p 2>/dev/null | sed 's/^up //' || true)"
+[[ -n "$uptime_now" ]] || uptime_now="$(awk '{printf "%.0f min", $1/60}' /proc/uptime 2>/dev/null || echo unknown)"
+processes_now="$(ps -e 2>/dev/null | awk 'NR>1{n++} END{print n+0}')"
+
+packages_now="unknown"
+if command -v dpkg-query >/dev/null 2>&1; then
+  packages_now="$(dpkg-query -f '.\n' -W 2>/dev/null | wc -l | awk '{print $1}') (dpkg)"
+elif command -v rpm >/dev/null 2>&1; then
+  packages_now="$(rpm -qa 2>/dev/null | wc -l | awk '{print $1}') (rpm)"
+elif command -v pacman >/dev/null 2>&1; then
+  packages_now="$(pacman -Qq 2>/dev/null | wc -l | awk '{print $1}') (pacman)"
+elif command -v apk >/dev/null 2>&1; then
+  packages_now="$(apk info 2>/dev/null | wc -l | awk '{print $1}') (apk)"
+fi
+
+cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)"
+freq="$(awk '/cpu MHz/ {printf "%.2f GHz", $4/1000; exit}' /proc/cpuinfo 2>/dev/null)"
+[[ -n "$freq" ]] && cpu_now="$cores cores @ $freq" || cpu_now="$cores cores"
+
+memory_now="$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {if(t>0) printf "%.2f GiB / %.2f GiB (%.0f%%)", (t-a)/1048576, t/1048576, ((t-a)*100/t); else print "unknown"}' /proc/meminfo 2>/dev/null)"
+disk_now="$(df -hP / 2>/dev/null | awk 'NR==2 {print $3 " / " $2 " (" $5 ") - " $1}')"
+ipv4_now="$(ip -o -4 addr show scope global 2>/dev/null | awk 'NR==1{print $4}')"
+ipv6_now="$(ip -o -6 addr show scope global 2>/dev/null | awk 'NR==1{print $4}')"
+[[ -n "$ipv4_now" ]] || ipv4_now="Not configured"
+[[ -n "$ipv6_now" ]] || ipv6_now="Not configured"
+
+shell_name="$(basename "${SHELL:-/bin/bash}")"
+info=(
+"${WHITE}${user_now}@${hostname_now}${NC}"
+"--------"
+"OS: ${OS_PRETTY} ${arch_now}"
+"Kernel: ${kernel_now}"
+"Uptime: ${uptime_now}"
+"Processes: ${processes_now}"
+"Packages: ${packages_now}"
+"Shell: ${shell_name}"
+"--------"
+"CPU: ${cpu_now}"
+"Memory: ${memory_now}"
+"Disk (/): ${disk_now}"
+"IPv4: ${ipv4_now}"
+"IPv6: ${ipv6_now}"
+)
+
+max=${#logo[@]}; (( ${#info[@]} > max )) && max=${#info[@]}
+for ((i=0; i<max; i++)); do
+  left="${logo[i]:-}"
+  right="${info[i]:-}"
+  printf '%b%-31s%b  %b\n' "$LOGO_COLOR" "$left" "$NC" "$right"
+done
+
+printf '\n%b ______        _   %b __  __       _%b\n' "$RED" "$WHITE" "$NC"
+printf '%b|  ____|      | |  %b|  \\/  |     | |%b\n' "$RED" "$WHITE" "$NC"
+printf '%b| |__ __ _ ___| |_ %b| \\  / | ___ | |__%b\n' "$RED" "$WHITE" "$NC"
+printf '%b|  __/ _` / __| __|%b| |\\/| |/ _ \\| '\''_ \\%b\n' "$RED" "$WHITE" "$NC"
+printf '%b| | | (_| \\__ \\ |_ %b| |  | | (_) | |_) |%b\n' "$RED" "$WHITE" "$NC"
+printf '%b|_|  \\__,_|___/\\__|%b|_|  |_|\\___/|_.__/%b\n' "$RED" "$WHITE" "$NC"
+WRAPPER
+
+  chmod 755 "$FASTMOB_WRAPPER"
 }
 
 ensure_bashrc_is_loaded_on_login() {
@@ -502,20 +1121,18 @@ PROFILE
 configure_fastmob_bashrc() {
   touch "$FASTMOB_BASHRC"
 
-  # Remove apenas blocos Fastmob criados por versões anteriores deste instalador.
   sed -i '/# >>> FASTMOB TERMINAL >>>/,/# <<< FASTMOB TERMINAL <<</d' "$FASTMOB_BASHRC"
 
-  # Evita duas telas quando a imagem da provedora já possuía um "fastfetch" simples.
-  sed -i -E 's/^([[:space:]]*)fastfetch[[:space:]]*$/\1# fastfetch substituído pelo terminal Fastmob/' "$FASTMOB_BASHRC"
+  # Desativa chamadas simples pré-existentes ao Fastfetch para evitar tela duplicada.
+  sed -i -E '/^[[:space:]]*fastfetch([[:space:]].*)?$/ s/^/# FASTMOB substituiu: /' "$FASTMOB_BASHRC"
 
   cat >> "$FASTMOB_BASHRC" <<'BASHRC'
 
 # >>> FASTMOB TERMINAL >>>
-# Exibe a identidade da distribuição + informações do servidor + logo Fastmob
-# somente em shells Bash interativos de login.
+# Executa somente em Bash interativo de login SSH/console.
 if [[ $- == *i* ]] && shopt -q login_shell; then
-    if command -v fastfetch >/dev/null 2>&1; then
-        fastfetch
+    if [[ -x /usr/local/bin/fastmob-terminal ]]; then
+        /usr/local/bin/fastmob-terminal
     fi
 fi
 # <<< FASTMOB TERMINAL <<<
@@ -526,9 +1143,20 @@ BASHRC
 }
 
 configure_fastmob_terminal() {
-  install_fastfetch
   write_fastmob_fastfetch_config
+  write_fastmob_wrapper
+
+  if install_fastfetch; then
+    printf 'Fastfetch instalado e validado com sucesso.\n'
+  else
+    printf '%b[AVISO]%b Fastfetch não está disponível para esta combinação de sistema/arquitetura.\n' "$YELLOW" "$NC"
+    printf 'O terminal Fastmob continuará funcionando pelo modo nativo automático.\n'
+  fi
+
   configure_fastmob_bashrc
+
+  # O wrapper precisa funcionar mesmo sem Fastfetch.
+  "$FASTMOB_WRAPPER" >/dev/null 2>&1 || return 1
 }
 
 # ==========================================================
@@ -632,20 +1260,55 @@ EOF
 
 restart_ssh_service() {
   if command_exists systemctl; then
-    if systemctl list-unit-files | grep -q '^ssh\.service'; then
+    if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.service'; then
       systemctl restart ssh.service
       systemctl enable ssh.service >/dev/null 2>&1 || true
       return 0
     fi
 
-    if systemctl list-unit-files | grep -q '^sshd\.service'; then
+    if systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then
       systemctl restart sshd.service
       systemctl enable sshd.service >/dev/null 2>&1 || true
       return 0
     fi
   fi
 
-  service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || die "Não foi possível reiniciar o serviço SSH."
+  if command_exists rc-service; then
+    if rc-service sshd status >/dev/null 2>&1 || [[ -x /etc/init.d/sshd ]]; then
+      rc-service sshd restart
+      command_exists rc-update && rc-update add sshd default >/dev/null 2>&1 || true
+      return 0
+    fi
+    if rc-service ssh status >/dev/null 2>&1 || [[ -x /etc/init.d/ssh ]]; then
+      rc-service ssh restart
+      command_exists rc-update && rc-update add ssh default >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+
+  if command_exists sv; then
+    if [[ -d /var/service/sshd || -d /etc/sv/sshd ]]; then
+      sv restart sshd && return 0
+    fi
+    if [[ -d /var/service/ssh || -d /etc/sv/ssh ]]; then
+      sv restart ssh && return 0
+    fi
+  fi
+
+  if command_exists service; then
+    service ssh restart 2>/dev/null && return 0
+    service sshd restart 2>/dev/null && return 0
+  fi
+
+  if [[ -x /etc/init.d/ssh ]]; then
+    /etc/init.d/ssh restart && return 0
+  fi
+
+  if [[ -x /etc/init.d/sshd ]]; then
+    /etc/init.d/sshd restart && return 0
+  fi
+
+  die "Não foi possível reiniciar o serviço SSH neste sistema de init (${SYSTEM_INIT})."
 }
 
 # ==========================================================
@@ -803,12 +1466,18 @@ print_summary() {
   printf '%b\n' "${GREEN}[ OK ]${WHITE} Regras salvas para persistir após reinicialização.${NC}"
 
   if [[ "$CONFIGURE_FASTMOB_TERMINAL" == "true" ]]; then
-    printf '%b\n' "${GREEN}[ OK ]${WHITE} Terminal Fastmob configurado com Fastfetch e logo automática do sistema.${NC}"
+    printf '%b\n' "${GREEN}[ OK ]${WHITE} Terminal Fastmob configurado com logo automática do sistema e fallback nativo.${NC}"
   fi
 
   if [[ -n "$public_ip" ]]; then
     printf '%b\n' "${BLUE}[ INFO ]${WHITE} IP detectado: ${public_ip}${NC}"
   fi
+
+  printf '%b\n' "${BLUE}[ INFO ]${WHITE} Sistema: ${SYSTEM_OS_PRETTY}${NC}"
+  printf '%b\n' "${BLUE}[ INFO ]${WHITE} Arquitetura: ${SYSTEM_ARCH_RAW} -> ${SYSTEM_ARCH}${NC}"
+  printf '%b\n' "${BLUE}[ INFO ]${WHITE} Libc: ${SYSTEM_LIBC} ${SYSTEM_LIBC_VERSION:-desconhecida}${NC}"
+  printf '%b\n' "${BLUE}[ INFO ]${WHITE} Gerenciador: ${PKG_MANAGER}${NC}"
+  printf '%b\n' "${BLUE}[ INFO ]${WHITE} Init: ${SYSTEM_INIT}${NC}"
 
   printf '%b\n' "${BLUE}[ INFO ]${WHITE} Backup salvo em: ${BACKUP_DIR}${NC}"
   printf '%b\n' "${BLUE}[ INFO ]${WHITE} Log salvo em: ${LOG_FILE}${NC}"
@@ -821,6 +1490,9 @@ main() {
   print_banner
 
   is_root || die "Execute como root. Use: sudo -i"
+
+  detect_system
+  print_detected_system
 
   run_step "Criando backup das configurações atuais" make_backup
 
