@@ -863,40 +863,69 @@ write_fastmob_wrapper() {
 
   cat > "$FASTMOB_WRAPPER" <<'WRAPPER'
 #!/usr/bin/env bash
-# Fastmob Terminal - Fastfetch + fallback nativo universal para Linux.
+# Fastmob Terminal - modo responsivo para desktop e mobile.
 
-# Se Fastfetch estiver funcional, ele faz a detecção automática da logo da distro.
-if command -v fastfetch >/dev/null 2>&1; then
-  CFG="${HOME:-/root}/.config/fastfetch/config.jsonc"
-  if [[ -r "$CFG" ]]; then
-    if fastfetch --config "$CFG" 2>/dev/null; then
-      exit 0
-    fi
-  elif fastfetch 2>/dev/null; then
-    exit 0
+init_colors() {
+  if [[ -t 1 ]]; then
+    RED=$'\e[1;31m'; GREEN=$'\e[1;32m'; BLUE=$'\e[1;34m'; WHITE=$'\e[1;37m'; NC=$'\e[0m'
+  else
+    RED=""; GREEN=""; BLUE=""; WHITE=""; NC=""
   fi
-fi
+}
 
-# ---------------- Fallback nativo ----------------
-if [[ -t 1 ]]; then
-  RED=$'\e[1;31m'; GREEN=$'\e[1;32m'; BLUE=$'\e[1;34m'; WHITE=$'\e[1;37m'; NC=$'\e[0m'
-else
-  RED=""; GREEN=""; BLUE=""; WHITE=""; NC=""
-fi
+get_term_cols() {
+  local cols=""
+  cols="$(tput cols 2>/dev/null || true)"
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols="80"
+  printf '%s\n' "$cols"
+}
 
-OS_ID="linux"; OS_PRETTY="Linux"
-if [[ -r /etc/os-release ]]; then
-  . /etc/os-release
-  OS_ID="${ID:-linux}"
-  OS_PRETTY="${PRETTY_NAME:-${NAME:-Linux}}"
-fi
+collect_system_info() {
+  OS_ID="linux"; OS_PRETTY="Linux"
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    OS_ID="${ID:-linux}"
+    OS_PRETTY="${PRETTY_NAME:-${NAME:-Linux}}"
+  fi
 
-# Logos ASCII compactas. Distribuições não listadas usam logo Linux genérica.
-logo=()
-case "${OS_ID,,}" in
-  debian|raspbian|kali|parrot|devuan)
-    LOGO_COLOR="$RED"
-    logo=(
+  hostname_now="$(hostname 2>/dev/null || echo VPS)"
+  user_now="$(id -un 2>/dev/null || echo root)"
+  kernel_now="$(uname -sr 2>/dev/null || echo unknown)"
+  arch_now="$(uname -m 2>/dev/null || echo unknown)"
+  uptime_now="$(uptime -p 2>/dev/null | sed 's/^up //' || true)"
+  [[ -n "$uptime_now" ]] || uptime_now="$(awk '{printf "%.0f min", $1/60}' /proc/uptime 2>/dev/null || echo unknown)"
+  processes_now="$(ps -e 2>/dev/null | awk 'NR>1{n++} END{print n+0}')"
+
+  packages_now="unknown"
+  if command -v dpkg-query >/dev/null 2>&1; then
+    packages_now="$(dpkg-query -f '.\n' -W 2>/dev/null | wc -l | awk '{print $1}') (dpkg)"
+  elif command -v rpm >/dev/null 2>&1; then
+    packages_now="$(rpm -qa 2>/dev/null | wc -l | awk '{print $1}') (rpm)"
+  elif command -v pacman >/dev/null 2>&1; then
+    packages_now="$(pacman -Qq 2>/dev/null | wc -l | awk '{print $1}') (pacman)"
+  elif command -v apk >/dev/null 2>&1; then
+    packages_now="$(apk info 2>/dev/null | wc -l | awk '{print $1}') (apk)"
+  fi
+
+  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)"
+  freq="$(awk '/cpu MHz/ {printf "%.2f GHz", $4/1000; exit}' /proc/cpuinfo 2>/dev/null)"
+  [[ -n "$freq" ]] && cpu_now="$cores cores @ $freq" || cpu_now="$cores cores"
+
+  memory_now="$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {if(t>0) printf "%.2f GiB / %.2f GiB (%.0f%%)", (t-a)/1048576, t/1048576, ((t-a)*100/t); else print "unknown"}' /proc/meminfo 2>/dev/null)"
+  disk_now="$(df -hP / 2>/dev/null | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')"
+  ipv4_now="$(ip -o -4 addr show scope global 2>/dev/null | awk 'NR==1{print $4}')"
+  ipv6_now="$(ip -o -6 addr show scope global 2>/dev/null | awk 'NR==1{print $4}')"
+  [[ -n "$ipv4_now" ]] || ipv4_now="Not configured"
+  [[ -n "$ipv6_now" ]] || ipv6_now="Not configured"
+  shell_name="$(basename "${SHELL:-/bin/bash}")"
+}
+
+set_logos() {
+  logo=()
+  case "${OS_ID,,}" in
+    debian|raspbian|kali|parrot|devuan)
+      LOGO_COLOR="$RED"
+      logo=(
 '       _,met$$$$$gg.'
 '    ,g$$$$$$$$$$$$$$$P.'
 '  ,g$$P""       """Y$$.".'
@@ -914,11 +943,11 @@ case "${OS_ID,,}" in
 '       `Y$$b.'
 '         `"Y$b._'
 '             `""""'
-    )
-    ;;
-  ubuntu|pop|linuxmint|elementary|zorin|neon)
-    LOGO_COLOR="$RED"
-    logo=(
+      )
+      ;;
+    ubuntu|pop|linuxmint|elementary|zorin|neon)
+      LOGO_COLOR="$RED"
+      logo=(
 '            .-/+oossssoo+/-. '
 '        `:+ssssssssssssssssss+:`'
 '      -+ssssssssssssssssssyyssss+-'
@@ -938,11 +967,11 @@ case "${OS_ID,,}" in
 '      -+sssssssssssssssssyyyssss+-'
 '        `:+ssssssssssssssssss+:`'
 '            .-/+oossssoo+/-. '
-    )
-    ;;
-  arch|manjaro|endeavouros)
-    LOGO_COLOR="$BLUE"
-    logo=(
+      )
+      ;;
+    arch|manjaro|endeavouros)
+      LOGO_COLOR="$BLUE"
+      logo=(
 '             /\\'
 '            /  \\'
 '           /\\   \\'
@@ -950,11 +979,11 @@ case "${OS_ID,,}" in
 '         /   ,,   \\'
 '        /   |  |  -\\'
 '       /_-``    ``-_\\'
-    )
-    ;;
-  fedora)
-    LOGO_COLOR="$BLUE"
-    logo=(
+      )
+      ;;
+    fedora)
+      LOGO_COLOR="$BLUE"
+      logo=(
 '          /:-------------:\\'
 '       :-------------------::'
 '     :-----------/shhOHbmp---:\\'
@@ -972,11 +1001,11 @@ case "${OS_ID,,}" in
 ' :---:sdNMMMMNds:------------:'
 ' :------:://:-------------::'
 ' :---------------------://'
-    )
-    ;;
-  almalinux|rocky|centos|rhel|ol)
-    LOGO_COLOR="$GREEN"
-    logo=(
+      )
+      ;;
+    almalinux|rocky|centos|rhel|ol)
+      LOGO_COLOR="$GREEN"
+      logo=(
 '        _____'
 '     .-`     `-.'
 '   .`  .-"""-.  `.'
@@ -985,11 +1014,11 @@ case "${OS_ID,,}" in
 '  \\   \\       /   /'
 '   `.  `-...-`  .`'
 '     `-.___.-`'
-    )
-    ;;
-  alpine)
-    LOGO_COLOR="$BLUE"
-    logo=(
+      )
+      ;;
+    alpine)
+      LOGO_COLOR="$BLUE"
+      logo=(
 '       .hddddddddddddddddddddddh.'
 '      :dddddddddddddddddddddddddd:'
 '     /dddddddddddddddddddddddddddd/'
@@ -998,11 +1027,11 @@ case "${OS_ID,,}" in
 ' `ydddddddddddd++hdddddddddddddddddddy`'
 '.hddddddddddd+`  `+ddddh:-sdddddddddddh.'
 'hdddddddddd+`      `+y:    .sddddddddddh'
-    )
-    ;;
-  opensuse*|suse|sles)
-    LOGO_COLOR="$GREEN"
-    logo=(
+      )
+      ;;
+    opensuse*|suse|sles)
+      LOGO_COLOR="$GREEN"
+      logo=(
 '           .;ldkO0000Okdl;.'
 '       .;d00xl:^`....`^:ok00d;.'
 '     .d00l`                `o00d.'
@@ -1010,11 +1039,11 @@ case "${OS_ID,,}" in
 '  .OKKKK0kOKKKKKKKKKKOxo:,      lKO.'
 ' ,0KKKKKKKKKKKKKKKK0P^,,,^dx:    ;00;'
 '.OKKKKKKKKKKKKKKKKk`.oOPPb.`  .lK.'
-    )
-    ;;
-  *)
-    LOGO_COLOR="$WHITE"
-    logo=(
+      )
+      ;;
+    *)
+      LOGO_COLOR="$WHITE"
+      logo=(
 '        .--.'
 '       |o_o |'
 '       |:_/ |'
@@ -1022,42 +1051,28 @@ case "${OS_ID,,}" in
 '     (|     | )'
 '    /`\\_   _/`\\'
 '    \\___)=(___/'
-    )
-    ;;
-esac
+      )
+      ;;
+  esac
+}
 
-hostname_now="$(hostname 2>/dev/null || echo VPS)"
-user_now="$(id -un 2>/dev/null || echo root)"
-kernel_now="$(uname -sr 2>/dev/null || echo unknown)"
-arch_now="$(uname -m 2>/dev/null || echo unknown)"
-uptime_now="$(uptime -p 2>/dev/null | sed 's/^up //' || true)"
-[[ -n "$uptime_now" ]] || uptime_now="$(awk '{printf "%.0f min", $1/60}' /proc/uptime 2>/dev/null || echo unknown)"
-processes_now="$(ps -e 2>/dev/null | awk 'NR>1{n++} END{print n+0}')"
+print_fastmob_logo_compact() {
+  printf '%bFAST%bMOB%b\n' "$RED" "$WHITE" "$NC"
+  printf '%bFastmob terminal compacto para mobile%b\n' "$WHITE" "$NC"
+}
 
-packages_now="unknown"
-if command -v dpkg-query >/dev/null 2>&1; then
-  packages_now="$(dpkg-query -f '.\n' -W 2>/dev/null | wc -l | awk '{print $1}') (dpkg)"
-elif command -v rpm >/dev/null 2>&1; then
-  packages_now="$(rpm -qa 2>/dev/null | wc -l | awk '{print $1}') (rpm)"
-elif command -v pacman >/dev/null 2>&1; then
-  packages_now="$(pacman -Qq 2>/dev/null | wc -l | awk '{print $1}') (pacman)"
-elif command -v apk >/dev/null 2>&1; then
-  packages_now="$(apk info 2>/dev/null | wc -l | awk '{print $1}') (apk)"
-fi
+print_fastmob_logo_full() {
+  printf '\n%b ______        _   %b __  __       _%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b|  ____|      | |  %b|  \\/  |     | |%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b| |__ __ _ ___| |_ %b| \\  / | ___ | |__%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b|  __/ _` / __| __|%b| |\\/| |/ _ \\| '\''_ \\%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b| | | (_| \\__ \\ |_ %b| |  | | (_) | |_) |%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b|_|  \\__,_|___/\\__|%b|_|  |_|\\___/|_.__/%b\n' "$RED" "$WHITE" "$NC"
+}
 
-cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)"
-freq="$(awk '/cpu MHz/ {printf "%.2f GHz", $4/1000; exit}' /proc/cpuinfo 2>/dev/null)"
-[[ -n "$freq" ]] && cpu_now="$cores cores @ $freq" || cpu_now="$cores cores"
-
-memory_now="$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {if(t>0) printf "%.2f GiB / %.2f GiB (%.0f%%)", (t-a)/1048576, t/1048576, ((t-a)*100/t); else print "unknown"}' /proc/meminfo 2>/dev/null)"
-disk_now="$(df -hP / 2>/dev/null | awk 'NR==2 {print $3 " / " $2 " (" $5 ") - " $1}')"
-ipv4_now="$(ip -o -4 addr show scope global 2>/dev/null | awk 'NR==1{print $4}')"
-ipv6_now="$(ip -o -6 addr show scope global 2>/dev/null | awk 'NR==1{print $4}')"
-[[ -n "$ipv4_now" ]] || ipv4_now="Not configured"
-[[ -n "$ipv6_now" ]] || ipv6_now="Not configured"
-
-shell_name="$(basename "${SHELL:-/bin/bash}")"
-info=(
+print_native_full() {
+  local info=()
+  info=(
 "${WHITE}${user_now}@${hostname_now}${NC}"
 "--------"
 "OS: ${OS_PRETTY} ${arch_now}"
@@ -1072,21 +1087,75 @@ info=(
 "Disk (/): ${disk_now}"
 "IPv4: ${ipv4_now}"
 "IPv6: ${ipv6_now}"
-)
+  )
 
-max=${#logo[@]}; (( ${#info[@]} > max )) && max=${#info[@]}
-for ((i=0; i<max; i++)); do
-  left="${logo[i]:-}"
-  right="${info[i]:-}"
-  printf '%b%-31s%b  %b\n' "$LOGO_COLOR" "$left" "$NC" "$right"
-done
+  local max=${#logo[@]}
+  (( ${#info[@]} > max )) && max=${#info[@]}
 
-printf '\n%b ______        _   %b __  __       _%b\n' "$RED" "$WHITE" "$NC"
-printf '%b|  ____|      | |  %b|  \\/  |     | |%b\n' "$RED" "$WHITE" "$NC"
-printf '%b| |__ __ _ ___| |_ %b| \\  / | ___ | |__%b\n' "$RED" "$WHITE" "$NC"
-printf '%b|  __/ _` / __| __|%b| |\\/| |/ _ \\| '\''_ \\%b\n' "$RED" "$WHITE" "$NC"
-printf '%b| | | (_| \\__ \\ |_ %b| |  | | (_) | |_) |%b\n' "$RED" "$WHITE" "$NC"
-printf '%b|_|  \\__,_|___/\\__|%b|_|  |_|\\___/|_.__/%b\n' "$RED" "$WHITE" "$NC"
+  local i left right
+  for ((i=0; i<max; i++)); do
+    left="${logo[i]:-}"
+    right="${info[i]:-}"
+    printf '%b%-31s%b  %b\n' "$LOGO_COLOR" "$left" "$NC" "$right"
+  done
+
+  print_fastmob_logo_full
+}
+
+print_native_compact() {
+  printf '%b%s@%s%b\n' "$WHITE" "$user_now" "$hostname_now" "$NC"
+  printf '%b------------------------------%b\n' "$GREEN" "$NC"
+
+  local line
+  for line in "${logo[@]}"; do
+    printf '%b%s%b\n' "$LOGO_COLOR" "$line" "$NC"
+  done
+
+  printf '%bOS:%b %s %s\n' "$RED" "$NC" "$OS_PRETTY" "$arch_now"
+  printf '%bKernel:%b %s\n' "$RED" "$NC" "$kernel_now"
+  printf '%bUptime:%b %s\n' "$RED" "$NC" "$uptime_now"
+  printf '%bCPU:%b %s\n' "$RED" "$NC" "$cpu_now"
+  printf '%bMemory:%b %s\n' "$RED" "$NC" "$memory_now"
+  printf '%bDisk:%b %s\n' "$RED" "$NC" "$disk_now"
+  printf '%bIPv4:%b %s\n' "$RED" "$NC" "$ipv4_now"
+  printf '%bIPv6:%b %s\n' "$RED" "$NC" "$ipv6_now"
+  printf '%bShell:%b %s\n' "$RED" "$NC" "$shell_name"
+
+  printf '\n'
+  print_fastmob_logo_compact
+}
+
+main() {
+  init_colors
+  collect_system_info
+  set_logos
+
+  local cols
+  cols="$(get_term_cols)"
+
+  # Mobile / telas estreitas: evita logo lateral do fastfetch e imprime tudo empilhado.
+  if [[ "$cols" -le 90 ]]; then
+    print_native_compact
+    exit 0
+  fi
+
+  # Desktop / telas mais largas: usa fastfetch quando disponivel.
+  if command -v fastfetch >/dev/null 2>&1; then
+    CFG="${HOME:-/root}/.config/fastfetch/config.jsonc"
+    if [[ -r "$CFG" ]]; then
+      if fastfetch --config "$CFG" 2>/dev/null; then
+        exit 0
+      fi
+    elif fastfetch 2>/dev/null; then
+      exit 0
+    fi
+  fi
+
+  # Fallback universal sem fastfetch.
+  print_native_full
+}
+
+main "$@"
 WRAPPER
 
   chmod 755 "$FASTMOB_WRAPPER"
