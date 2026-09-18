@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # By DuiBR - Otimizado
-# Script para habilitar login root por senha e liberar todas as portas da VPS
-# Compatível principalmente com Debian/Ubuntu
+# Script para habilitar login root por senha, liberar portas e personalizar o terminal Fastmob
+# Compatível principalmente com Debian/Ubuntu e com suporte ao Fastfetch em outras distribuições
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -14,6 +14,12 @@ INSTALL_DEPENDENCIES="true"
 CONFIGURE_DNS="true"
 ENABLE_ROOT_PASSWORD_LOGIN="true"
 OPEN_ALL_PORTS="true"
+CONFIGURE_FASTMOB_TERMINAL="true"
+
+FASTMOB_ROOT_HOME="/root"
+FASTMOB_CONFIG_DIR="${FASTMOB_ROOT_HOME}/.config/fastfetch"
+FASTMOB_CONFIG_FILE="${FASTMOB_CONFIG_DIR}/config.jsonc"
+FASTMOB_BASHRC="${FASTMOB_ROOT_HOME}/.bashrc"
 
 DNS_1="1.1.1.1"
 DNS_2="8.8.8.8"
@@ -77,9 +83,17 @@ command_exists() {
 print_banner() {
   clear || true
 
+  printf '%b\n' "${RED} ______        _   ${WHITE} __  __       _${NC}"
+  printf '%b\n' "${RED}|  ____|      | |  ${WHITE}|  \\/  |     | |${NC}"
+  printf '%b\n' "${RED}| |__ __ _ ___| |_ ${WHITE}| \\  / | ___ | |__${NC}"
+  printf '%b\n' "${RED}|  __/ _\` / __| __|${WHITE}| |\\/| |/ _ \\| '_ \\${NC}"
+  printf '%b\n' "${RED}| | | (_| \\__ \\ |_ ${WHITE}| |  | | (_) | |_) |${NC}"
+  printf '%b\n' "${RED}|_|  \\__,_|___/\\__|${WHITE}|_|  |_|\\___/|_.__/${NC}"
+  echo
   printf '%b\n' "${RED}╔════════════════════════════════════════════════════════════╗${NC}"
   printf '%b\n' "${RED}║                 🚨 AVISO DE SEGURANÇA 🚨                  ║${NC}"
   printf '%b\n' "${WHITE}║ Este script habilita login root por senha e libera portas. ║${NC}"
+  printf '%b\n' "${WHITE}║ Também instala o terminal personalizado Fastmob.           ║${NC}"
   printf '%b\n' "${WHITE}║ Use apenas em VPS própria e com responsabilidade.          ║${NC}"
   printf '%b\n' "${WHITE}║ O mais seguro é usar SSH por chave e firewall restrito.    ║${NC}"
   printf '%b\n' "${RED}╚════════════════════════════════════════════════════════════╝${NC}"
@@ -164,6 +178,11 @@ make_backup() {
   backup_dir "/etc/ssh/sshd_config.d"
   backup_file "/etc/resolv.conf"
   backup_file "/etc/nftables.conf"
+  backup_file "$FASTMOB_BASHRC"
+  backup_file "${FASTMOB_ROOT_HOME}/.profile"
+  backup_file "${FASTMOB_ROOT_HOME}/.bash_profile"
+  backup_file "${FASTMOB_ROOT_HOME}/.bash_login"
+  backup_dir "$FASTMOB_CONFIG_DIR"
 
   if command_exists iptables-save; then
     iptables-save > "$BACKUP_DIR/iptables-rules.v4" || true
@@ -206,7 +225,10 @@ install_dependencies() {
       iptables-persistent \
       netfilter-persistent \
       nftables \
-      ca-certificates
+      ca-certificates \
+      curl \
+      iproute2 \
+      procps
 
     return 0
   fi
@@ -216,7 +238,10 @@ install_dependencies() {
       openssh-server \
       iptables-services \
       nftables \
-      ca-certificates || true
+      ca-certificates \
+      curl \
+      iproute \
+      procps-ng || true
     return 0
   fi
 
@@ -225,11 +250,285 @@ install_dependencies() {
       openssh-server \
       iptables-services \
       nftables \
-      ca-certificates || true
+      ca-certificates \
+      curl \
+      iproute \
+      procps-ng || true
     return 0
   fi
 
   printf '%b[AVISO]%b Gerenciador de pacotes não detectado. Continuando sem instalar dependências.\n' "$YELLOW" "$NC"
+}
+
+# ==========================================================
+# TERMINAL FASTMOB / FASTFETCH
+# ==========================================================
+
+fastfetch_asset_arch() {
+  local arch=""
+
+  if command_exists dpkg; then
+    arch="$(dpkg --print-architecture 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$arch" ]]; then
+    arch="$(uname -m 2>/dev/null || true)"
+  fi
+
+  case "$arch" in
+    amd64|x86_64)
+      printf '%s\n' "amd64"
+      ;;
+    arm64|aarch64)
+      printf '%s\n' "aarch64"
+      ;;
+    armhf|armv7l|armv7*)
+      printf '%s\n' "armv7l"
+      ;;
+    i386|i486|i586|i686)
+      printf '%s\n' "i686"
+      ;;
+    s390x)
+      printf '%s\n' "s390x"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+install_fastfetch() {
+  if command_exists fastfetch; then
+    return 0
+  fi
+
+  command_exists curl || die "curl não encontrado. Ative INSTALL_DEPENDENCIES ou instale curl."
+
+  local ff_arch=""
+  ff_arch="$(fastfetch_asset_arch)" || die "Arquitetura não suportada automaticamente para instalar o Fastfetch: $(uname -m)."
+
+  local base_url="https://github.com/fastfetch-cli/fastfetch/releases/latest/download"
+  local tmp_pkg=""
+
+  if command_exists apt-get && command_exists dpkg; then
+    tmp_pkg="$(mktemp --suffix=.deb)"
+    curl -fL --retry 3 --connect-timeout 15 \
+      "${base_url}/fastfetch-linux-${ff_arch}.deb" \
+      -o "$tmp_pkg"
+
+    apt-get install -y "$tmp_pkg"
+    rm -f "$tmp_pkg"
+    command_exists fastfetch || die "Fastfetch foi instalado, mas o comando não foi encontrado."
+    return 0
+  fi
+
+  if command_exists dnf; then
+    dnf install -y fastfetch >/dev/null 2>&1 || {
+      tmp_pkg="$(mktemp --suffix=.rpm)"
+      curl -fL --retry 3 --connect-timeout 15 \
+        "${base_url}/fastfetch-linux-${ff_arch}.rpm" \
+        -o "$tmp_pkg"
+      dnf install -y "$tmp_pkg"
+      rm -f "$tmp_pkg"
+    }
+    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com dnf."
+    return 0
+  fi
+
+  if command_exists yum; then
+    yum install -y fastfetch >/dev/null 2>&1 || {
+      tmp_pkg="$(mktemp --suffix=.rpm)"
+      curl -fL --retry 3 --connect-timeout 15 \
+        "${base_url}/fastfetch-linux-${ff_arch}.rpm" \
+        -o "$tmp_pkg"
+      yum install -y "$tmp_pkg"
+      rm -f "$tmp_pkg"
+    }
+    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com yum."
+    return 0
+  fi
+
+  if command_exists apk; then
+    apk add --no-cache fastfetch
+    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com apk."
+    return 0
+  fi
+
+  if command_exists pacman; then
+    pacman -Sy --noconfirm fastfetch
+    command_exists fastfetch || die "Não foi possível instalar o Fastfetch com pacman."
+    return 0
+  fi
+
+  die "Gerenciador compatível para instalar o Fastfetch não encontrado."
+}
+
+write_fastmob_fastfetch_config() {
+  mkdir -p "$FASTMOB_CONFIG_DIR"
+
+  cat > "$FASTMOB_CONFIG_FILE" <<'FASTFETCH'
+{
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+    "logo": {
+        "type": "auto"
+    },
+    "display": {
+        "separator": ": "
+    },
+    "modules": [
+        {
+            "type": "title",
+            "format": "{user-name}@{host-name}"
+        },
+        {
+            "type": "separator",
+            "string": "----"
+        },
+        {
+            "type": "os",
+            "key": "OS"
+        },
+        {
+            "type": "kernel",
+            "key": "Kernel"
+        },
+        {
+            "type": "uptime",
+            "key": "Uptime"
+        },
+        {
+            "type": "processes",
+            "key": "Processes"
+        },
+        {
+            "type": "packages",
+            "key": "Packages"
+        },
+        {
+            "type": "shell",
+            "key": "Shell"
+        },
+        {
+            "type": "separator",
+            "string": "----"
+        },
+        {
+            "type": "command",
+            "key": "CPU",
+            "text": "cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1); freq=$(awk '/cpu MHz/ {printf \"%.2f GHz\", $4/1000; exit}' /proc/cpuinfo 2>/dev/null); if [ -n \"$freq\" ]; then [ \"$cores\" -eq 1 ] && echo \"$cores core @ $freq\" || echo \"$cores cores @ $freq\"; else [ \"$cores\" -eq 1 ] && echo \"$cores core\" || echo \"$cores cores\"; fi"
+        },
+        {
+            "type": "memory",
+            "key": "Memory"
+        },
+        {
+            "type": "disk",
+            "key": "Disk (/)",
+            "folders": "/"
+        },
+        {
+            "type": "localip",
+            "key": "IPv4",
+            "format": "{ipv4}"
+        },
+        {
+            "type": "command",
+            "key": "IPv6",
+            "text": "ipv6=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2; exit}'); [ -n \"$ipv6\" ] && echo \"$ipv6\" || echo \"Not configured\""
+        },
+        {
+            "type": "command",
+            "key": " ",
+            "text": "pgrep -x 'apt|apt-get|dpkg|pacman|yum|dnf|zypper' >/dev/null 2>&1 && printf '\\033[1;33m(!) Warning: System update running in background\\033[0m\\n' || true"
+        },
+        "break",
+        {
+            "type": "custom",
+            "format": "{#red} ______        _   {#white} __  __       _"
+        },
+        {
+            "type": "custom",
+            "format": "{#red}|  ____|      | |  {#white}|  \\/  |     | |"
+        },
+        {
+            "type": "custom",
+            "format": "{#red}| |__ __ _ ___| |_ {#white}| \\  / | ___ | |__"
+        },
+        {
+            "type": "custom",
+            "format": "{#red}|  __/ _` / __| __|{#white}| |\\/| |/ _ \\| '_ \\"
+        },
+        {
+            "type": "custom",
+            "format": "{#red}| | | (_| \\__ \\ |_ {#white}| |  | | (_) | |_) |"
+        },
+        {
+            "type": "custom",
+            "format": "{#red}|_|  \\__,_|___/\\__|{#white}|_|  |_|\\___/|_.__/"
+        }
+    ]
+}
+FASTFETCH
+
+  chmod 600 "$FASTMOB_CONFIG_FILE"
+}
+
+ensure_bashrc_is_loaded_on_login() {
+  local login_profile=""
+
+  if [[ -f "${FASTMOB_ROOT_HOME}/.bash_profile" ]]; then
+    login_profile="${FASTMOB_ROOT_HOME}/.bash_profile"
+  elif [[ -f "${FASTMOB_ROOT_HOME}/.bash_login" ]]; then
+    login_profile="${FASTMOB_ROOT_HOME}/.bash_login"
+  else
+    login_profile="${FASTMOB_ROOT_HOME}/.profile"
+    touch "$login_profile"
+  fi
+
+  if grep -Eq '^[[:space:]]*(source|\.)[[:space:]].*\.bashrc' "$login_profile" 2>/dev/null; then
+    return 0
+  fi
+
+  cat >> "$login_profile" <<'PROFILE'
+
+# >>> FASTMOB: carregar .bashrc no login >>>
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+# <<< FASTMOB: carregar .bashrc no login <<<
+PROFILE
+}
+
+configure_fastmob_bashrc() {
+  touch "$FASTMOB_BASHRC"
+
+  # Remove apenas blocos Fastmob criados por versões anteriores deste instalador.
+  sed -i '/# >>> FASTMOB TERMINAL >>>/,/# <<< FASTMOB TERMINAL <<</d' "$FASTMOB_BASHRC"
+
+  # Evita duas telas quando a imagem da provedora já possuía um "fastfetch" simples.
+  sed -i -E 's/^([[:space:]]*)fastfetch[[:space:]]*$/\1# fastfetch substituído pelo terminal Fastmob/' "$FASTMOB_BASHRC"
+
+  cat >> "$FASTMOB_BASHRC" <<'BASHRC'
+
+# >>> FASTMOB TERMINAL >>>
+# Exibe a identidade da distribuição + informações do servidor + logo Fastmob
+# somente em shells Bash interativos de login.
+if [[ $- == *i* ]] && shopt -q login_shell; then
+    if command -v fastfetch >/dev/null 2>&1; then
+        fastfetch
+    fi
+fi
+# <<< FASTMOB TERMINAL <<<
+BASHRC
+
+  chmod 600 "$FASTMOB_BASHRC"
+  ensure_bashrc_is_loaded_on_login
+}
+
+configure_fastmob_terminal() {
+  install_fastfetch
+  write_fastmob_fastfetch_config
+  configure_fastmob_bashrc
 }
 
 # ==========================================================
@@ -503,6 +802,10 @@ print_summary() {
   printf '%b\n' "${GREEN}[ OK ]${WHITE} Todas as portas IPv4/IPv6 foram liberadas na VPS.${NC}"
   printf '%b\n' "${GREEN}[ OK ]${WHITE} Regras salvas para persistir após reinicialização.${NC}"
 
+  if [[ "$CONFIGURE_FASTMOB_TERMINAL" == "true" ]]; then
+    printf '%b\n' "${GREEN}[ OK ]${WHITE} Terminal Fastmob configurado com Fastfetch e logo automática do sistema.${NC}"
+  fi
+
   if [[ -n "$public_ip" ]]; then
     printf '%b\n' "${BLUE}[ INFO ]${WHITE} IP detectado: ${public_ip}${NC}"
   fi
@@ -523,6 +826,10 @@ main() {
 
   if [[ "$INSTALL_DEPENDENCIES" == "true" ]]; then
     run_step "Instalando/verificando dependências" install_dependencies
+  fi
+
+  if [[ "$CONFIGURE_FASTMOB_TERMINAL" == "true" ]]; then
+    run_step "Instalando/configurando terminal Fastmob" configure_fastmob_terminal
   fi
 
   if [[ "$CONFIGURE_DNS" == "true" ]]; then
