@@ -922,6 +922,7 @@ collect_system_info() {
 
 set_logos() {
   logo=()
+  logo_compact=()
   case "${OS_ID,,}" in
     debian|raspbian|kali|parrot|devuan)
       LOGO_COLOR="$RED"
@@ -944,29 +945,56 @@ set_logos() {
 '         `"Y$b._'
 '             `""""'
       )
+      logo_compact=(
+'       _,met$$$$$gg.'
+'    ,g$$$$$$$$$$$$$$$P.'
+'  ,g$$P""       """Y$$.".'
+' ,$$P`              `$$$.'
+'`,$$P       ,ggs.     `$$b:'
+'`d$$`     ,$P"`   .    $$$'
+' $$P      d$`     ,    $$P'
+' $$:      $$.   -    ,d$$`'
+' $$;      Y$b._   _,d$P`'
+' Y$$.    `.`"Y$$$$P"`'
+' `$$b      "-.__'
+'  `Y$$b'
+'   `Y$$.'
+'     `$$b.'
+'       `Y$$b.'
+'         `"Y$b._'
+'             `""""'
+      )
       ;;
     ubuntu|pop|linuxmint|elementary|zorin|neon)
       LOGO_COLOR="$RED"
       logo=(
-'            .-/+oossssoo+/-. '
-'        `:+ssssssssssssssssss+:`'
-'      -+ssssssssssssssssssyyssss+-'
-'    .ossssssssssssssssssdMMMNysssso.'
-'   /ssssssssssshdmmNNmmyNMMMMhssssss/'
-'  +ssssssssshmydMMMMMMMNddddyssssssss+'
-' /sssssssshNMMMyhhyyyyhmNMMMNhssssssss/'
-'.ssssssssdMMMNhsssssssssshNMMMdssssssss.'
-'+sssshhhyNMMNyssssssssssssyNMMMysssssss+'
-'ossyNMMMNyMMhsssssssssssssshmmmhssssssso'
-'+sssshhhyNMMNyssssssssssssyNMMMysssssss+'
-'.ssssssssdMMMNhsssssssssshNMMMdssssssss.'
-' /sssssssshNMMMyhhyyyyhdNMMMNhssssssss/'
-'  +sssssssssdmydMMMMMMMMddddyssssssss+'
-'   /ssssssssssshdmNNNNmyNMMMMhssssss/'
-'    .ossssssssssssssssssdMMMNysssso.'
-'      -+sssssssssssssssssyyyssss+-'
-'        `:+ssssssssssssssssss+:`'
-'            .-/+oossssoo+/-. '
+'              .-://:-.'
+'         `:+++++++++++++:`'
+'       .+++++++++++++++++++-'
+'      /++++++++++++++++++++++/'
+'     :++++++++++++++/:+++++++: '
+'    :++++++++++++/.    .:++++++:'
+'    +++++++++++:  .--.   :+++++++'
+'    +++++++++++  ( oo )  ++++++++'
+'    :++++++++++:  `--`  :+++++++: '
+'     /++++++++++++:..:++++++++++/'
+'      :++++++++++++++++++++++++:'
+'       .+++++++++++++++++++++-'
+'         `:+++++++++++++++:`'
+'              .-://::-. '
+      )
+      logo_compact=(
+'           .-""-.'
+'       .-"  .-.  "-.'
+'     .'   _(_|_)_   `.'
+'    /   .`  / \  `.   \\'
+'   ;   /   ( O )   \   ;'
+'   |  |     \_/     |  |'
+'   ;   \   .-.-.   /   ;'
+'    \\   `.(_|_).`   //'
+'     `.    `-.-`   .`'
+'       "-.       .-"'
+'          `-._.-`'
       )
       ;;
     arch|manjaro|endeavouros)
@@ -979,6 +1007,13 @@ set_logos() {
 '         /   ,,   \\'
 '        /   |  |  -\\'
 '       /_-``    ``-_\\'
+      )
+      logo_compact=(
+'             /\\'
+'            /  \\'
+'           / /\\ \\'
+'          / /  \\ \\'
+'         /_/    \\_\\'
       )
       ;;
     fedora)
@@ -1002,6 +1037,13 @@ set_logos() {
 ' :------:://:-------------::'
 ' :---------------------://'
       )
+      logo_compact=(
+'      .--. '
+'     |--. \\'
+'     |   | |'
+'     |--. /'
+'     `--`'
+      )
       ;;
     almalinux|rocky|centos|rhel|ol)
       LOGO_COLOR="$GREEN"
@@ -1011,6 +1053,15 @@ set_logos() {
 '   .`  .-"""-.  `.'
 '  /   /       \\   \\'
 ' ;   |  LINUX  |   ;'
+'  \\   \\       /   /'
+'   `.  `-...-`  .`'
+'     `-.___.-`'
+      )
+      logo_compact=(
+'        _____'
+'     .-`     `-.'
+'   .`  .-"""-.  `.'
+'  /   /       \\   \\'
 '  \\   \\       /   /'
 '   `.  `-...-`  .`'
 '     `-.___.-`'
@@ -1028,6 +1079,13 @@ set_logos() {
 '.hddddddddddd+`  `+ddddh:-sdddddddddddh.'
 'hdddddddddd+`      `+y:    .sddddddddddh'
       )
+      logo_compact=(
+'       /\\'
+'      /  \\'
+'     / /\\ \\'
+'    / /  \\ \\'
+'   /_/    \\_\\'
+      )
       ;;
     opensuse*|suse|sles)
       LOGO_COLOR="$GREEN"
@@ -1039,6 +1097,14 @@ set_logos() {
 '  .OKKKK0kOKKKKKKKKKKOxo:,      lKO.'
 ' ,0KKKKKKKKKKKKKKKK0P^,,,^dx:    ;00;'
 '.OKKKKKKKKKKKKKKKKk`.oOPPb.`  .lK.'
+      )
+      logo_compact=(
+'      ,;:;;,'
+'   .:okOOOkdc.'
+'  ;OOOxl,,;dOc'
+'  lOO;     oOl'
+'  ;OOc.  .xOO:'
+'   .cdkOOOko:'
       )
       ;;
     *)
@@ -1052,13 +1118,26 @@ set_logos() {
 '    /`\\_   _/`\\'
 '    \\___)=(___/'
       )
+      logo_compact=(
+'        .--.'
+'       |o_o |'
+'       |:_/ |'
+'      //   \\ \\'
+'     (|     | )'
+'    /`\\_   _/`\\'
+'    \\___)=(___/'
+      )
       ;;
   esac
 }
 
 print_fastmob_logo_compact() {
-  printf '%bFAST%bMOB%b\n' "$RED" "$WHITE" "$NC"
-  printf '%bFastmob terminal compacto para mobile%b\n' "$WHITE" "$NC"
+  printf '\n%b ______        _   %b __  __       _%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b|  ____|      | |  %b|  \\/  |     | |%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b| |__ __ _ ___| |_ %b| \\  / | ___ | |__%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b|  __/ _` / __| __|%b| |\\/| |/ _ \\| '\''_ \\%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b| | | (_| \\__ \\ |_ %b| |  | | (_) | |_) |%b\n' "$RED" "$WHITE" "$NC"
+  printf '%b|_|  \\__,_|___/\\__|%b|_|  |_|\\___/|_.__/%b\n' "$RED" "$WHITE" "$NC"
 }
 
 print_fastmob_logo_full() {
@@ -1107,7 +1186,7 @@ print_native_compact() {
   printf '%b------------------------------%b\n' "$GREEN" "$NC"
 
   local line
-  for line in "${logo[@]}"; do
+  for line in "${logo_compact[@]}"; do
     printf '%b%s%b\n' "$LOGO_COLOR" "$line" "$NC"
   done
 
